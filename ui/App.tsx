@@ -12,7 +12,7 @@ import { SettingsModal } from './components/SettingsModal';
 import { ConsolePanel } from './components/ConsolePanel';
 import { SongProfile } from './components/SongProfile';
 import { Song, GenerationParams, View, Playlist } from './types';
-import { generateApi, songsApi, playlistsApi, getAudioUrl, preferencesApi } from './services/api';
+import { generateApi, songsApi, playlistsApi, getAudioUrl, preferencesApi, sunoApi } from './services/api';
 import { useAuth } from './context/AuthContext';
 import { useResponsive } from './context/ResponsiveContext';
 import { List } from 'lucide-react';
@@ -622,6 +622,100 @@ export default function App() {
     setShowRightSidebar(true);
 
     try {
+      // ===== Suno API Generation Flow =====
+      if (params.backend === 'suno') {
+        console.log('[Create] Suno generation flow');
+        const sunoParams: Record<string, unknown> = {
+          prompt: params.prompt || params.style || '',
+          model: params.sunoModel || 'V5_5',
+          custom_mode: params.customMode,
+          is_instrumental: params.instrumental,
+          callback_url: params.callbackUrl || '',
+        };
+        if (params.style) sunoParams.style = params.style;
+        if (params.title) sunoParams.title = params.title;
+        if (params.lyrics) sunoParams.lyrics = params.lyrics;
+        if (params.vocalGender) sunoParams.vocal_gender = params.vocalGender;
+        if (params.negativeTags) sunoParams.negative_tags = params.negativeTags;
+        if (params.styleWeight !== undefined) sunoParams.style_weight = params.styleWeight;
+        if (params.weirdnessConstraint !== undefined) sunoParams.weirdness_constraint = params.weirdnessConstraint;
+        if (params.personaId) {
+          sunoParams.persona_id = params.personaId;
+          sunoParams.persona_model = params.personaModel || 'style_persona';
+        }
+        if (params.customSeed) sunoParams.custom_seed = params.customSeed;
+
+        const result = await sunoApi.generateMusic(sunoParams as any);
+
+        // Check for Suno API errors (HTTP 200 but JSON code != 200)
+        if (result.code && result.code !== 200) {
+          throw new Error(result.msg || result.message || `Suno API error (code ${result.code})`);
+        }
+
+        const sunoTaskId = result.data?.task_id || result.data?.id || (result as any).task_id || (result as any).id;
+        if (!sunoTaskId) {
+          throw new Error('No task ID returned from Suno API');
+        }
+
+        // Poll for Suno completion
+        const pollInterval = setInterval(async () => {
+          try {
+            const status = await sunoApi.getGenerationStatus(sunoTaskId);
+            const statusData = status as any;
+            const taskStatus = statusData.data?.status || statusData.status;
+
+            // Update temp song with status
+            setSongs(prev => prev.map(s => {
+              if (s.id === tempId) {
+                return {
+                  ...s,
+                  generationSteps: taskStatus || 'processing',
+                  isGenerating: true,
+                };
+              }
+              return s;
+            }));
+
+            // Check completion
+            if (taskStatus === 'SUCCESS' || taskStatus === 'complete') {
+              clearInterval(pollInterval);
+              activeJobsRef.current.delete(sunoTaskId);
+              setActiveJobCount(activeJobsRef.current.size);
+              await refreshSongsList();
+              if (window.innerWidth < 768) setMobileShowList(true);
+            } else if (taskStatus === 'FAILED' || taskStatus === 'ERROR') {
+              clearInterval(pollInterval);
+              activeJobsRef.current.delete(sunoTaskId);
+              setActiveJobCount(activeJobsRef.current.size);
+              const errMsg = statusData.data?.error || statusData.data?.msg || 'Suno generation failed';
+              showToast(`Suno generation failed: ${errMsg}`, 'error');
+              setSongs(prev => prev.filter(s => s.id !== tempId));
+              if (activeJobsRef.current.size === 0) setIsGenerating(false);
+            }
+          } catch (pollError) {
+            console.error(`Suno polling error for task ${sunoTaskId}:`, pollError);
+          }
+        }, 3000);
+
+        // Track this Suno job
+        activeJobsRef.current.set(sunoTaskId, { tempId, pollInterval });
+        setActiveJobCount(activeJobsRef.current.size);
+
+        // Timeout after 10 minutes
+        setTimeout(() => {
+          if (activeJobsRef.current.has(sunoTaskId)) {
+            console.warn(`Suno task ${sunoTaskId} timed out`);
+            clearInterval(pollInterval);
+            activeJobsRef.current.delete(sunoTaskId);
+            setActiveJobCount(activeJobsRef.current.size);
+            showToast('Suno generation timed out', 'error');
+          }
+        }, 600000);
+
+        return; // Skip ACE-Step generation flow
+      }
+
+      // ===== ACE-Step Generation Flow =====
       const prefs = await preferencesApi.get();
       const genParams = {
         customMode: params.customMode,

@@ -13,6 +13,16 @@ import uuid
 from pathlib import Path
 from flask import Blueprint, jsonify, request, send_file
 
+# Suno API imports
+try:
+    import suno_client
+    import generate_suno
+    import config_suno
+    SUNO_AVAILABLE = True
+except ImportError as e:
+    SUNO_AVAILABLE = False
+    logging.warning(f"[API generate] Suno API modules not available: {e}")
+
 def _uppercase_track_in_instruction(instruction):
     """Uppercase TRACK_NAME in 'Generate the X track ...' to match ACE-Step (cli.py _default_instruction_for_task)."""
     if not instruction or " track " not in instruction:
@@ -116,12 +126,177 @@ def _on_job_progress(
 register_job_progress_callback(_on_job_progress)
 
 
+def _run_suno_generation(job_id: str) -> None:
+    """Background: run generation via Suno API and update job."""
+    global _generation_busy, _current_job_id
+    
+    try:
+        with _jobs_lock:
+            job = _jobs.get(job_id)
+            if not job or job.get("status") != "queued":
+                return
+            job["status"] = "running"
+            job["progressPercent"] = 0.0
+            job["progressSteps"] = None
+            job["progressEta"] = None
+            job["progressStage"] = ""
+            _current_job_id = job_id
+        
+        # Get parameters
+        params = job.get("params") or {}
+        if not isinstance(params, dict):
+            params = {}
+        
+        # Get API key
+        api_key = config_suno.get_suno_api_key()
+        if not api_key:
+            raise RuntimeError("Suno API key not configured. Please set it in Settings.")
+        
+        # Create Suno client
+        client = suno_client.SunoAPIClient(api_key)
+        
+        try:
+            cdmf_state.set_current_generation_job_id(job_id)
+            cancel_check = lambda: _is_cancel_requested(job_id)
+            
+            # Map parameters
+            song_desc = params.get("songDescription") or params.get("style") or ""
+            lyrics_text = params.get("lyrics") or ""
+            is_instrumental = bool(params.get("instrumental", True))
+            
+            # Duration
+            try:
+                duration = float(params.get("duration") or -1)
+                if duration <= 0:
+                    duration = 60
+            except (TypeError, ValueError):
+                duration = 60
+            duration = max(15, min(240, duration))
+            
+            # Model selection
+            suno_model = params.get("sunoModel") or config_suno.get_default_suno_model()
+            
+            # Title
+            title = (params.get("title") or "Untitled").strip()[:200] or "Track"
+            
+            # Callback wrapper
+            def _on_progress(percent: int, stage: str, status_data: dict):
+                """Suno progress callback wrapper"""
+                with _jobs_lock:
+                    j = _jobs.get(job_id)
+                    if j:
+                        j["progressPercent"] = percent
+                        j["progressStage"] = stage
+                        eta = status_data.get("estimated_time_remaining")
+                        if eta:
+                            j["progressEta"] = eta
+            
+            # Call Generate via Suno
+            summary = generate_suno.generate_track_suno(
+                suno_client=client,
+                genre_prompt=song_desc,
+                lyrics=lyrics_text,
+                instrumental=is_instrumental,
+                target_seconds=int(duration),
+                suno_model=suno_model,
+                basename=title,
+                out_dir=Path(params.get("outputDir", "").strip() or get_output_dir()),
+                cancel_check=cancel_check,
+                progress_callback=lambda pct, st, cur, total, eta: _on_progress(int(pct*100), st, {}),
+                **params,
+            )
+            
+            # Extract results
+            wav_path = summary.get("wav_path")
+            if isinstance(wav_path, Path):
+                wav_path = Path(str(wav_path))
+            else:
+                wav_path = Path(str(wav_path))
+            
+            filename = wav_path.name
+            audio_url = f"/audio/{filename}"
+            actual_seconds = float(summary.get("actual_seconds") or duration)
+            
+            # Save track metadata
+            try:
+                meta = load_track_meta()
+                job_title = (params.get("title") or "Untitled").strip()[:500] or "Track"
+                job_lyrics = (params.get("lyrics") or "").strip()
+                job_style = (params.get("style") or params.get("songDescription") or "").strip()
+                
+                entry = meta.get(filename, {})
+                entry["title"] = job_title
+                entry["lyrics"] = job_lyrics[:10000]
+                entry["style"] = job_style[:500] or job_title
+                entry["caption"] = entry["style"]
+                entry["seconds"] = actual_seconds
+                entry["created"] = time.time()
+                entry["backend"] = "suno"
+                entry["suno_model"] = suno_model
+                
+                meta[filename] = entry
+                save_track_meta(meta)
+            except Exception as meta_err:
+                logging.warning("[API generate] Failed to save track metadata: %s", meta_err)
+            
+            # Update job with success
+            with _jobs_lock:
+                job = _jobs.get(job_id)
+                if job:
+                    job["status"] = "succeeded"
+                    job["result"] = {
+                        "audioUrls": [audio_url],
+                        "duration": int(actual_seconds),
+                        "status": "succeeded",
+                        "backend": "suno",
+                        "sunoModel": suno_model,
+                    }
+            
+            logging.info("[API generate] Suno generation succeeded: %s", wav_path)
+            
+        except Exception as gen_err:
+            logging.exception("[API generate] Suno generation failed for job %s", job_id)
+            with _jobs_lock:
+                job = _jobs.get(job_id)
+                if job:
+                    job["status"] = "failed"
+                    job["error"] = str(gen_err)
+    finally:
+        cdmf_state.set_current_generation_job_id(None)
+        _generation_busy = False
+        with _jobs_lock:
+            _current_job_id = None
+            _cancel_requested.discard(job_id)
+        
+        # Start next queued job
+        with _jobs_lock:
+            for jid in _job_order:
+                job = _jobs.get(jid)
+                if job and job.get("status") == "queued":
+                    _generation_busy = True
+                    threading.Thread(target=_run_generation, args=(jid,), daemon=True).start()
+                    break
+
+
+
 def _run_generation(job_id: str) -> None:
     """Background: run generate_track_ace and update job."""
     global _generation_busy, _current_job_id
     try:
         with _jobs_lock:
             job = _jobs.get(job_id)
+        # Determine which backend to use
+        with _jobs_lock:
+            job = _jobs.get(job_id)
+            backend = job.get("backend", "suno") if job else "suno"
+        
+        # Dispatch to appropriate backend
+        if backend == "suno" and SUNO_AVAILABLE:
+            _run_suno_generation(job_id)
+            return
+        
+        # Fall back to ACE-Step (local) or if backend is aceduce/acestep
+
             if not job or job.get("status") != "queued":
                 return
             job["status"] = "running"
@@ -550,6 +725,10 @@ def create_job():
         # Store a copy so we don't keep a reference to the request body
         try:
             params_copy = dict(data)
+        # Store backend preference (default to Suno)
+        backend = data.get("backend", "suno")
+        params_copy["backend"] = backend
+
         except (TypeError, ValueError):
             params_copy = {}
         config = load_config()
@@ -612,6 +791,810 @@ def get_status(job_id: str):
 
 
 @bp.route("/unstick", methods=["POST"])
+
+@bp.route("/suno/credits", methods=["GET"])
+def get_suno_credits():
+    """GET /api/generate/suno/credits - Get remaining Suno API credits."""
+    if not SUNO_AVAILABLE:
+        return jsonify({"error": "Suno API not available"}), 500
+    
+    try:
+        api_key = config_suno.get_suno_api_key()
+        if not api_key:
+            return jsonify({"credits": 0, "configured": False, "error": "No API key configured"}), 200
+        
+        client = suno_client.SunoAPIClient(api_key)
+        result = client.get_remaining_credits()
+        return jsonify({"credits": result, "configured": True})
+    except Exception as e:
+        logging.exception("[API generate] Failed to get Suno credits: %s", e)
+        return jsonify({"credits": 0, "configured": False, "error": str(e)}), 500
+
+@bp.route("/suno/config", methods=["GET"])
+def get_suno_config():
+    """GET /api/generate/suno/config - Get Suno API configuration."""
+    if not SUNO_AVAILABLE:
+        return jsonify({"available": False}), 500
+    
+    try:
+        config = config_suno.get_suno_config_dict()
+        return jsonify(config)
+    except Exception as e:
+        logging.exception("[API generate] Failed to get Suno config: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+@bp.route("/suno/config", methods=["POST"])
+def set_suno_config():
+    """POST /api/generate/suno/config - Set Suno API configuration."""
+    if not SUNO_AVAILABLE:
+        return jsonify({"error": "Suno API not available"}), 500
+    
+    try:
+        data = request.get_json(silent=True) or {}
+        api_key = data.get("apiKey", "").strip()
+        callback_url = data.get("callbackUrl", "").strip()
+        default_model = data.get("defaultModel", "").strip()
+        
+        updated = {}
+        if api_key:
+            success = config_suno.set_suno_api_key(api_key)
+            if not success:
+                return jsonify({"error": "Failed to save API key"}), 500
+            updated["apiKey"] = True
+        if callback_url:
+            config_suno.set_suno_callback_url(callback_url)
+            updated["callbackUrl"] = True
+        if default_model:
+            config_suno.set_default_suno_model(default_model)
+            updated["defaultModel"] = True
+        
+        if not updated:
+            return jsonify({"error": "No configuration values provided"}), 400
+        return jsonify({"success": True, "updated": updated})
+    except Exception as e:
+        logging.exception("[API generate] Failed to set Suno config: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+# ===========================================================================
+# Suno API Proxy Endpoints
+# All endpoints forward requests to the actual Suno API via suno_client
+# ===========================================================================
+
+def _get_suno_client():
+    """Get an authenticated Suno API client, or raise."""
+    if not SUNO_AVAILABLE:
+        raise RuntimeError("Suno API modules not available")
+    api_key = config_suno.get_suno_api_key()
+    if not api_key:
+        raise RuntimeError("Suno API key not configured. Set it in Settings.")
+    return suno_client.SunoAPIClient(api_key)
+
+
+@bp.route("/suno/generate", methods=["POST"])
+def suno_generate():
+    """POST /api/generate/suno/generate - Generate music via Suno API."""
+    try:
+        client = _get_suno_client()
+        data = request.get_json(silent=True) or {}
+        callback_url = data.get("callbackUrl") or config_suno.get_suno_callback_url()
+        if not callback_url:
+            return jsonify({"error": "callbackUrl is required for Suno generation"}), 400
+        
+        result = client.generate_music(
+            prompt=data.get("prompt", ""),
+            lyrics=data.get("lyrics"),
+            is_instrumental=data.get("instrumental", True),
+            model=data.get("model") or config_suno.get_default_suno_model() or "V4_5",
+            custom_mode=data.get("customMode", False),
+            title=data.get("title"),
+            style=data.get("style"),
+            negative_tags=data.get("negativeTags"),
+            duration_seconds=data.get("duration"),
+            callback_url=callback_url,
+            persona_id=data.get("personaId"),
+            persona_model=data.get("personaModel"),
+            vocal_gender=data.get("vocalGender"),
+            style_weight=data.get("styleWeight"),
+            weirdness_constraint=data.get("weirdnessConstraint"),
+            audio_weight=data.get("audioWeight"),
+            custom_seed=data.get("customSeed"),
+        )
+        return jsonify(result)
+    except Exception as e:
+        logging.exception("[API generate] Suno generate failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/suno/status/<task_id>", methods=["GET"])
+def suno_get_status(task_id: str):
+    """GET /api/generate/suno/status/:taskId - Get Suno generation status."""
+    try:
+        client = _get_suno_client()
+        result = client.get_generation_status(task_id)
+        return jsonify(result)
+    except Exception as e:
+        logging.exception("[API generate] Suno get status failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/suno/extend", methods=["POST"])
+def suno_extend():
+    """POST /api/generate/suno/extend - Extend existing Suno generation."""
+    try:
+        client = _get_suno_client()
+        data = request.get_json(silent=True) or {}
+        callback_url = data.get("callbackUrl") or config_suno.get_suno_callback_url()
+        if not callback_url:
+            return jsonify({"error": "callbackUrl is required"}), 400
+        
+        result = client.extend_music(
+            task_id=data.get("taskId", ""),
+            callback_url=callback_url,
+            prompt=data.get("prompt"),
+            lyrics=data.get("lyrics"),
+            model=data.get("model"),
+            continue_at=data.get("continueAt"),
+            title=data.get("title"),
+            style=data.get("style"),
+            instrumental=data.get("instrumental"),
+        )
+        return jsonify(result)
+    except Exception as e:
+        logging.exception("[API generate] Suno extend failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/suno/upload-extend", methods=["POST"])
+def suno_upload_extend():
+    """POST /api/generate/suno/upload-extend - Upload and extend audio."""
+    try:
+        client = _get_suno_client()
+        data = request.get_json(silent=True) or {}
+        callback_url = data.get("callbackUrl") or config_suno.get_suno_callback_url()
+        if not callback_url:
+            return jsonify({"error": "callbackUrl is required"}), 400
+        
+        result = client.upload_and_extend_audio(
+            audio_url=data.get("audioUrl", ""),
+            callback_url=callback_url,
+            prompt=data.get("prompt"),
+            lyrics=data.get("lyrics"),
+            model=data.get("model"),
+            continue_at=data.get("continueAt"),
+            title=data.get("title"),
+            style=data.get("style"),
+            instrumental=data.get("instrumental"),
+        )
+        return jsonify(result)
+    except Exception as e:
+        logging.exception("[API generate] Suno upload-extend failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/suno/cover", methods=["POST"])
+def suno_cover():
+    """POST /api/generate/suno/cover - Generate cover of existing track."""
+    try:
+        client = _get_suno_client()
+        data = request.get_json(silent=True) or {}
+        callback_url = data.get("callbackUrl") or config_suno.get_suno_callback_url()
+        if not callback_url:
+            return jsonify({"error": "callbackUrl is required"}), 400
+        
+        result = client.cover_music(
+            task_id=data.get("taskId", ""),
+            callback_url=callback_url,
+            prompt=data.get("prompt"),
+            model=data.get("model"),
+            title=data.get("title"),
+            style=data.get("style"),
+            instrumental=data.get("instrumental"),
+        )
+        return jsonify(result)
+    except Exception as e:
+        logging.exception("[API generate] Suno cover failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/suno/upload-cover", methods=["POST"])
+def suno_upload_cover():
+    """POST /api/generate/suno/upload-cover - Upload and cover audio."""
+    try:
+        client = _get_suno_client()
+        data = request.get_json(silent=True) or {}
+        callback_url = data.get("callbackUrl") or config_suno.get_suno_callback_url()
+        if not callback_url:
+            return jsonify({"error": "callbackUrl is required"}), 400
+        
+        result = client.upload_and_cover_audio(
+            audio_url=data.get("audioUrl", ""),
+            callback_url=callback_url,
+            prompt=data.get("prompt"),
+            model=data.get("model"),
+            title=data.get("title"),
+            style=data.get("style"),
+            instrumental=data.get("instrumental"),
+        )
+        return jsonify(result)
+    except Exception as e:
+        logging.exception("[API generate] Suno upload-cover failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/suno/add-vocals", methods=["POST"])
+def suno_add_vocals():
+    """POST /api/generate/suno/add-vocals - Add vocals to instrumental."""
+    try:
+        client = _get_suno_client()
+        data = request.get_json(silent=True) or {}
+        callback_url = data.get("callbackUrl") or config_suno.get_suno_callback_url()
+        if not callback_url:
+            return jsonify({"error": "callbackUrl is required"}), 400
+        
+        result = client.add_vocals(
+            task_id=data.get("taskId", ""),
+            callback_url=callback_url,
+            prompt=data.get("prompt"),
+            lyrics=data.get("lyrics"),
+            model=data.get("model"),
+            title=data.get("title"),
+            style=data.get("style"),
+            vocal_gender=data.get("vocalGender"),
+        )
+        return jsonify(result)
+    except Exception as e:
+        logging.exception("[API generate] Suno add-vocals failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/suno/add-instrumental", methods=["POST"])
+def suno_add_instrumental():
+    """POST /api/generate/suno/add-instrumental - Add instrumental to vocals."""
+    try:
+        client = _get_suno_client()
+        data = request.get_json(silent=True) or {}
+        callback_url = data.get("callbackUrl") or config_suno.get_suno_callback_url()
+        if not callback_url:
+            return jsonify({"error": "callbackUrl is required"}), 400
+        
+        result = client.add_instrumental(
+            task_id=data.get("taskId", ""),
+            callback_url=callback_url,
+            prompt=data.get("prompt"),
+            model=data.get("model"),
+            title=data.get("title"),
+            style=data.get("style"),
+        )
+        return jsonify(result)
+    except Exception as e:
+        logging.exception("[API generate] Suno add-instrumental failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/suno/separate-vocals", methods=["POST"])
+def suno_separate_vocals():
+    """POST /api/generate/suno/separate-vocals - Separate vocals from music."""
+    try:
+        client = _get_suno_client()
+        data = request.get_json(silent=True) or {}
+        callback_url = data.get("callbackUrl") or config_suno.get_suno_callback_url()
+        if not callback_url:
+            return jsonify({"error": "callbackUrl is required"}), 400
+        
+        result = client.separate_vocals_from_music(
+            task_id=data.get("taskId", ""),
+            audio_id=data.get("audioId", ""),
+            callback_url=callback_url,
+            separation_type=data.get("separationType", "separate_vocal"),
+        )
+        return jsonify(result)
+    except Exception as e:
+        logging.exception("[API generate] Suno separate-vocals failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/suno/vocal-separation-status/<task_id>", methods=["GET"])
+def suno_vocal_separation_status(task_id: str):
+    """GET /api/generate/suno/vocal-separation-status/:taskId."""
+    try:
+        client = _get_suno_client()
+        result = client.get_vocal_separation_details(task_id)
+        return jsonify(result)
+    except Exception as e:
+        logging.exception("[API generate] Suno vocal separation status failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/suno/generate-lyrics", methods=["POST"])
+def suno_generate_lyrics():
+    """POST /api/generate/suno/generate-lyrics - Generate lyrics via Suno."""
+    try:
+        client = _get_suno_client()
+        data = request.get_json(silent=True) or {}
+        
+        result = client.generate_lyrics(
+            prompt=data.get("prompt", ""),
+            theme=data.get("theme"),
+            language=data.get("language"),
+            verse_count=data.get("verseCount", 2),
+        )
+        return jsonify(result)
+    except Exception as e:
+        logging.exception("[API generate] Suno generate-lyrics failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/suno/lyrics-status/<task_id>", methods=["GET"])
+def suno_lyrics_status(task_id: str):
+    """GET /api/generate/suno/lyrics-status/:taskId."""
+    try:
+        client = _get_suno_client()
+        result = client.get_lyrics_generation_details(task_id)
+        return jsonify(result)
+    except Exception as e:
+        logging.exception("[API generate] Suno lyrics status failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/suno/timestamped-lyrics/<lyrics_id>", methods=["GET"])
+def suno_timestamped_lyrics(lyrics_id: str):
+    """GET /api/generate/suno/timestamped-lyrics/:lyricsId."""
+    try:
+        client = _get_suno_client()
+        result = client.get_timestamped_lyrics(lyrics_id)
+        return jsonify(result)
+    except Exception as e:
+        logging.exception("[API generate] Suno timestamped lyrics failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/suno/boost-style", methods=["POST"])
+def suno_boost_style():
+    """POST /api/generate/suno/boost-style - Boost style description."""
+    try:
+        client = _get_suno_client()
+        data = request.get_json(silent=True) or {}
+        
+        result = client.boost_music_style(data.get("content", ""))
+        return jsonify(result)
+    except Exception as e:
+        logging.exception("[API generate] Suno boost-style failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/suno/generate-midi", methods=["POST"])
+def suno_generate_midi():
+    """POST /api/generate/suno/generate-midi - Generate MIDI from audio."""
+    try:
+        client = _get_suno_client()
+        data = request.get_json(silent=True) or {}
+        callback_url = data.get("callbackUrl") or config_suno.get_suno_callback_url()
+        if not callback_url:
+            return jsonify({"error": "callbackUrl is required"}), 400
+        
+        result = client.generate_midi_from_audio(
+            task_id=data.get("taskId", ""),
+            audio_id=data.get("audioId", ""),
+            callback_url=callback_url,
+        )
+        return jsonify(result)
+    except Exception as e:
+        logging.exception("[API generate] Suno generate-midi failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/suno/midi-status/<task_id>", methods=["GET"])
+def suno_midi_status(task_id: str):
+    """GET /api/generate/suno/midi-status/:taskId."""
+    try:
+        client = _get_suno_client()
+        result = client.get_midi_generation_details(task_id)
+        return jsonify(result)
+    except Exception as e:
+        logging.exception("[API generate] Suno midi status failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/suno/generate-persona", methods=["POST"])
+def suno_generate_persona():
+    """POST /api/generate/suno/generate-persona - Generate persona from audio."""
+    try:
+        client = _get_suno_client()
+        data = request.get_json(silent=True) or {}
+        callback_url = data.get("callbackUrl") or config_suno.get_suno_callback_url()
+        if not callback_url:
+            return jsonify({"error": "callbackUrl is required"}), 400
+        
+        result = client.generate_persona(
+            audio_url=data.get("audioUrl", ""),
+            persona_name=data.get("personaName", ""),
+            callback_url=callback_url,
+            description=data.get("description"),
+        )
+        return jsonify(result)
+    except Exception as e:
+        logging.exception("[API generate] Suno generate-persona failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/suno/mashup", methods=["POST"])
+def suno_mashup():
+    """POST /api/generate/suno/mashup - Generate mashup from multiple audios."""
+    try:
+        client = _get_suno_client()
+        data = request.get_json(silent=True) or {}
+        callback_url = data.get("callbackUrl") or config_suno.get_suno_callback_url()
+        if not callback_url:
+            return jsonify({"error": "callbackUrl is required"}), 400
+        
+        result = client.generate_mashup(
+            audio_urls=data.get("audioUrls", []),
+            prompt=data.get("prompt", ""),
+            callback_url=callback_url,
+            style=data.get("style"),
+            title=data.get("title"),
+        )
+        return jsonify(result)
+    except Exception as e:
+        logging.exception("[API generate] Suno mashup failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/suno/replace-section", methods=["POST"])
+def suno_replace_section():
+    """POST /api/generate/suno/replace-section - Replace a section of music."""
+    try:
+        client = _get_suno_client()
+        data = request.get_json(silent=True) or {}
+        callback_url = data.get("callbackUrl") or config_suno.get_suno_callback_url()
+        if not callback_url:
+            return jsonify({"error": "callbackUrl is required"}), 400
+        
+        result = client.replace_music_section(
+            task_id=data.get("taskId", ""),
+            audio_id=data.get("audioId", ""),
+            start_time=data.get("startTime", 0),
+            end_time=data.get("endTime", 0),
+            prompt=data.get("prompt", ""),
+            callback_url=callback_url,
+            model=data.get("model"),
+        )
+        return jsonify(result)
+    except Exception as e:
+        logging.exception("[API generate] Suno replace-section failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/suno/generate-sounds", methods=["POST"])
+def suno_generate_sounds():
+    """POST /api/generate/suno/generate-sounds - Generate sound effects."""
+    try:
+        client = _get_suno_client()
+        data = request.get_json(silent=True) or {}
+        callback_url = data.get("callbackUrl") or config_suno.get_suno_callback_url()
+        if not callback_url:
+            return jsonify({"error": "callbackUrl is required"}), 400
+        
+        result = client.generate_sounds(
+            prompt=data.get("prompt", ""),
+            callback_url=callback_url,
+            duration=data.get("duration"),
+            num_sounds=data.get("numSounds", 1),
+        )
+        return jsonify(result)
+    except Exception as e:
+        logging.exception("[API generate] Suno generate-sounds failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/suno/create-video", methods=["POST"])
+def suno_create_video():
+    """POST /api/generate/suno/create-video - Create music video (MP4)."""
+    try:
+        client = _get_suno_client()
+        data = request.get_json(silent=True) or {}
+        callback_url = data.get("callbackUrl") or config_suno.get_suno_callback_url()
+        if not callback_url:
+            return jsonify({"error": "callbackUrl is required"}), 400
+        
+        result = client.create_music_video(
+            task_id=data.get("taskId", ""),
+            audio_id=data.get("audioId", ""),
+            callback_url=callback_url,
+            author=data.get("author"),
+            domain_name=data.get("domainName"),
+        )
+        return jsonify(result)
+    except Exception as e:
+        logging.exception("[API generate] Suno create-video failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/suno/video-status/<task_id>", methods=["GET"])
+def suno_video_status(task_id: str):
+    """GET /api/generate/suno/video-status/:taskId."""
+    try:
+        client = _get_suno_client()
+        result = client.get_music_video_details(task_id)
+        return jsonify(result)
+    except Exception as e:
+        logging.exception("[API generate] Suno video status failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/suno/convert-wav", methods=["POST"])
+def suno_convert_wav():
+    """POST /api/generate/suno/convert-wav - Convert track to WAV format."""
+    try:
+        client = _get_suno_client()
+        data = request.get_json(silent=True) or {}
+        callback_url = data.get("callbackUrl") or config_suno.get_suno_callback_url()
+        if not callback_url:
+            return jsonify({"error": "callbackUrl is required"}), 400
+        
+        result = client.convert_to_wav_format(
+            task_id=data.get("taskId", ""),
+            audio_id=data.get("audioId", ""),
+            callback_url=callback_url,
+        )
+        return jsonify(result)
+    except Exception as e:
+        logging.exception("[API generate] Suno convert-wav failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/suno/wav-status/<task_id>", methods=["GET"])
+def suno_wav_status(task_id: str):
+    """GET /api/generate/suno/wav-status/:taskId."""
+    try:
+        client = _get_suno_client()
+        result = client.get_wav_conversion_details(task_id)
+        return jsonify(result)
+    except Exception as e:
+        logging.exception("[API generate] Suno wav status failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/suno/generate-cover-image", methods=["POST"])
+def suno_generate_cover_image():
+    """POST /api/generate/suno/generate-cover-image - Generate cover image."""
+    try:
+        client = _get_suno_client()
+        data = request.get_json(silent=True) or {}
+        callback_url = data.get("callbackUrl") or config_suno.get_suno_callback_url()
+        if not callback_url:
+            return jsonify({"error": "callbackUrl is required"}), 400
+        
+        result = client.generate_music_cover(
+            task_id=data.get("taskId", ""),
+            callback_url=callback_url,
+        )
+        return jsonify(result)
+    except Exception as e:
+        logging.exception("[API generate] Suno generate-cover-image failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/suno/cover-image-status/<task_id>", methods=["GET"])
+def suno_cover_image_status(task_id: str):
+    """GET /api/generate/suno/cover-image-status/:taskId."""
+    try:
+        client = _get_suno_client()
+        result = client.get_cover_generation_details(task_id)
+        return jsonify(result)
+    except Exception as e:
+        logging.exception("[API generate] Suno cover image status failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+# ========== Suno Voice API ==========
+
+@bp.route("/suno/voice/generate-validation", methods=["POST"])
+def suno_voice_generate_validation():
+    """POST /api/generate/suno/voice/generate-validation - Generate voice validation phrase."""
+    try:
+        client = _get_suno_client()
+        data = request.get_json(silent=True) or {}
+        callback_url = data.get("callbackUrl") or config_suno.get_suno_callback_url()
+        if not callback_url:
+            return jsonify({"error": "callbackUrl is required"}), 400
+        
+        result = client.suno_voice_generate_validation_phrase(callback_url=callback_url)
+        return jsonify(result)
+    except Exception as e:
+        logging.exception("[API generate] Suno voice generate-validation failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/suno/voice/validate-info/<task_id>", methods=["GET"])
+def suno_voice_validate_info(task_id: str):
+    """GET /api/generate/suno/voice/validate-info/:taskId."""
+    try:
+        client = _get_suno_client()
+        result = client.suno_voice_get_validation_phrase(task_id=task_id)
+        return jsonify(result)
+    except Exception as e:
+        logging.exception("[API generate] Suno voice validate-info failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/suno/voice/create", methods=["POST"])
+def suno_voice_create():
+    """POST /api/generate/suno/voice/create - Create custom voice."""
+    try:
+        client = _get_suno_client()
+        data = request.get_json(silent=True) or {}
+        callback_url = data.get("callbackUrl") or config_suno.get_suno_callback_url()
+        if not callback_url:
+            return jsonify({"error": "callbackUrl is required"}), 400
+        
+        result = client.suno_voice_create_custom_voice(
+            task_id=data.get("taskId", ""),
+            audio_url=data.get("audioUrl", ""),
+            callback_url=callback_url,
+        )
+        return jsonify(result)
+    except Exception as e:
+        logging.exception("[API generate] Suno voice create failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/suno/voice/record-info/<task_id>", methods=["GET"])
+def suno_voice_record_info(task_id: str):
+    """GET /api/generate/suno/voice/record-info/:taskId."""
+    try:
+        client = _get_suno_client()
+        result = client.suno_voice_get_custom_voice_record(task_id=task_id)
+        return jsonify(result)
+    except Exception as e:
+        logging.exception("[API generate] Suno voice record-info failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/suno/voice/regenerate", methods=["POST"])
+def suno_voice_regenerate():
+    """POST /api/generate/suno/voice/regenerate - Regenerate voice phrase."""
+    try:
+        client = _get_suno_client()
+        data = request.get_json(silent=True) or {}
+        callback_url = data.get("callbackUrl") or config_suno.get_suno_callback_url()
+        if not callback_url:
+            return jsonify({"error": "callbackUrl is required"}), 400
+        
+        result = client.suno_voice_regenerate_phrase(
+            task_id=data.get("taskId", ""),
+            callback_url=callback_url,
+        )
+        return jsonify(result)
+    except Exception as e:
+        logging.exception("[API generate] Suno voice regenerate failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/suno/voice/check", methods=["POST"])
+def suno_voice_check():
+    """POST /api/generate/suno/voice/check - Check voice availability."""
+    try:
+        client = _get_suno_client()
+        data = request.get_json(silent=True) or {}
+        
+        result = client.suno_voice_check_availability(task_id=data.get("taskId", ""))
+        return jsonify(result)
+    except Exception as e:
+        logging.exception("[API generate] Suno voice check failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+# ========== Suno File Upload ==========
+
+@bp.route("/suno/upload-file", methods=["POST"])
+def suno_upload_file():
+    """POST /api/generate/suno/upload-file - Upload file to Suno via stream."""
+    try:
+        client = _get_suno_client()
+        
+        if "file" not in request.files:
+            return jsonify({"error": "No file provided"}), 400
+        
+        f = request.files["file"]
+        if not f.filename:
+            return jsonify({"error": "No filename"}), 400
+        
+        # Save to temp file and upload
+        import tempfile
+        with tempfile.NamedTemporaryFile(delete=False, suffix=Path(f.filename).suffix) as tmp:
+            f.save(tmp)
+            tmp_path = tmp.name
+        
+        try:
+            result = client.upload_file_via_stream(tmp_path)
+        finally:
+            os.unlink(tmp_path)
+        
+        return jsonify(result)
+    except Exception as e:
+        logging.exception("[API generate] Suno upload-file failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/suno/upload-url", methods=["POST"])
+def suno_upload_url():
+    """POST /api/generate/suno/upload-url - Upload file to Suno via URL."""
+    try:
+        client = _get_suno_client()
+        data = request.get_json(silent=True) or {}
+        
+        result = client.upload_file_via_url(
+            file_url=data.get("fileUrl", ""),
+            upload_path=data.get("uploadPath"),
+            file_name=data.get("fileName"),
+        )
+        return jsonify(result)
+    except Exception as e:
+        logging.exception("[API generate] Suno upload-url failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/suno/upload-base64", methods=["POST"])
+def suno_upload_base64():
+    """POST /api/generate/suno/upload-base64 - Upload file to Suno via base64."""
+    try:
+        client = _get_suno_client()
+        data = request.get_json(silent=True) or {}
+        
+        result = client.upload_file_via_base64(
+            base64_data=data.get("base64Data", ""),
+            upload_path=data.get("uploadPath"),
+            file_name=data.get("fileName"),
+        )
+        return jsonify(result)
+    except Exception as e:
+        logging.exception("[API generate] Suno upload-base64 failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+# ========== Suno Utility ==========
+
+@bp.route("/suno/ping", methods=["GET"])
+def suno_ping():
+    """GET /api/generate/suno/ping - Ping Suno API and return credits."""
+    try:
+        client = _get_suno_client()
+        result = client.ping()
+        return jsonify(result)
+    except Exception as e:
+        logging.exception("[API generate] Suno ping failed: %s", e)
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route("/suno/details/<path_type>/<task_id>", methods=["GET"])
+def suno_get_details(path_type: str, task_id: str):
+    """GET /api/generate/suno/details/:type/:taskId - Get details by type."""
+    try:
+        client = _get_suno_client()
+        
+        type_map = {
+            "generation": client.get_generation_status,
+            "lyrics": client.get_lyrics_generation_details,
+            "vocal": client.get_vocal_separation_details,
+            "midi": client.get_midi_generation_details,
+            "video": client.get_music_video_details,
+            "cover": client.get_cover_generation_details,
+            "wav": client.get_wav_conversion_details,
+        }
+        
+        handler = type_map.get(path_type)
+        if not handler:
+            return jsonify({"error": f"Unknown detail type: {path_type}"}), 400
+        
+        result = handler(task_id)
+        return jsonify(result)
+    except Exception as e:
+        logging.exception("[API generate] Suno get details failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
 def unstick_queue():
     """POST /api/generate/unstick — clear stuck worker state and start the next queued job (if any)."""
     global _generation_busy
@@ -730,7 +1713,7 @@ def get_history():
 @bp.route("/endpoints", methods=["GET"])
 def get_endpoints():
     """GET /api/generate/endpoints."""
-    return jsonify({"endpoints": {"provider": "acestep-local", "endpoint": "local"}})
+    return jsonify({"endpoints": {"provider": "suno-api", "endpoint": "https://api.sunoapi.org", "local": true, "endpoint": "local"}})
 
 
 @bp.route("/health", methods=["GET"])

@@ -2,7 +2,10 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Sparkles, ChevronDown, Settings2, Trash2, Music2, Sliders, Dices, Hash, RefreshCw, Plus, Upload, Play, Pause, Info, Loader2, Wrench } from 'lucide-react';
 import { GenerationParams, Song } from '../types';
 import { useAuth } from '../context/AuthContext';
-import { generateApi, preferencesApi, aceStepModelsApi, type LoraAdapter } from '../services/api';
+import { generateApi, preferencesApi, aceStepModelsApi, sunoApi, type LoraAdapter, SUNO_MODEL_INFO, type SunoModel } from '../services/api';
+import { SunoModelSelector, getModelLimits, SUNO_MODELS } from './SunoModelSelector';
+import { BackendSelector } from './BackendSelector';
+import { CreditsDisplay } from './CreditsDisplay';
 
 /** Tasks that require ACE-Step Base model only (see docs/ACE-Step-Tutorial.md). */
 const TASKS_REQUIRING_BASE = ['lego', 'extract', 'complete'] as const;
@@ -161,6 +164,39 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
   // Mode: simple | custom | cover | lego
   const [createMode, setCreateMode] = useState<CreateMode>('custom');
   const customMode = createMode === 'custom';
+
+  // Backend: suno | acestep
+  const [backend, setBackend] = useState<'suno' | 'acestep'>('suno');
+  const isSuno = backend === 'suno';
+
+  // Suno-specific state
+  const [sunoModel, setSunoModel] = useState<SunoModel>('V5_5');
+  const [callbackUrl, setCallbackUrl] = useState('');
+  const [personaId, setPersonaId] = useState('');
+  const [personaModel, setPersonaModel] = useState<'style_persona' | 'voice_persona'>('style_persona');
+  const [vocalGender, setVocalGender] = useState<'m' | 'f' | ''>('');
+  const [negativeTags, setNegativeTags] = useState('');
+  const [styleWeight, setStyleWeight] = useState(0.5);
+  const [weirdnessConstraint, setWeirdnessConstraint] = useState(0.5);
+  const [audioWeight, setAudioWeight] = useState(0.5);
+  const [customSeed, setCustomSeed] = useState('');
+  const [sunoCredits, setSunoCredits] = useState<number | null>(null);
+
+  // Load Suno config on mount
+  useEffect(() => {
+    if (isSuno) {
+      sunoApi.getConfig().then(data => {
+        if (data.callback_url) setCallbackUrl(data.callback_url);
+        if (data.default_model) setSunoModel(data.default_model as SunoModel);
+      }).catch(() => {});
+      sunoApi.getCredits().then(data => {
+        setSunoCredits(data.credits_left ?? data.credits ?? null);
+      }).catch(() => {});
+    }
+  }, [isSuno]);
+
+  // Get current model limits
+  const modelLimits = getModelLimits(sunoModel);
 
   // Cover tab: pure cover (source + caption) or blend (source + style audio)
   const [coverCaption, setCoverCaption] = useState('');
@@ -837,6 +873,16 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
         lmBatchChunkSize,
         negativePrompt: negativePrompt.trim() || undefined,
         isFormatCaption,
+        backend,
+        sunoModel,
+        callbackUrl: callbackUrl,
+        personaId: personaId.trim() || undefined,
+        personaModel,
+        negativeTags: negativeTags.trim() || undefined,
+        vocalGender: vocalGender || undefined,
+        styleWeight,
+        weirdnessConstraint,
+        customSeed: customSeed.trim() || undefined,
       });
       return;
     }
@@ -905,6 +951,16 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
         lmBatchChunkSize,
         negativePrompt: negativePrompt.trim() || undefined,
         isFormatCaption,
+        backend,
+        sunoModel,
+        callbackUrl: callbackUrl,
+        personaId: personaId.trim() || undefined,
+        personaModel,
+        negativeTags: negativeTags.trim() || undefined,
+        vocalGender: vocalGender || undefined,
+        styleWeight,
+        weirdnessConstraint,
+        customSeed: customSeed.trim() || undefined,
       });
       return;
     }
@@ -980,6 +1036,16 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
         lmBatchChunkSize,
         negativePrompt: negativePrompt.trim() || undefined,
         isFormatCaption,
+        backend,
+        sunoModel,
+        callbackUrl: callbackUrl,
+        personaId: personaId.trim() || undefined,
+        personaModel,
+        negativeTags: negativeTags.trim() || undefined,
+        vocalGender: vocalGender || undefined,
+        styleWeight,
+        weirdnessConstraint,
+        customSeed: customSeed.trim() || undefined,
       });
     }
 
@@ -1011,44 +1077,96 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
           onLoadedMetadata={(e) => setSourceDuration(e.currentTarget.duration || 0)}
         />
 
-        {/* Header - Mode Toggle */}
-        <div className="flex items-center justify-end">
-          <div className="flex items-center bg-zinc-200 dark:bg-black/40 rounded-lg p-1 border border-zinc-300 dark:border-white/5">
-            <button
-              onClick={() => { setCreateMode('simple'); setLegoValidationError(''); setCoverValidationError(''); }}
-              className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-all ${createMode === 'simple' ? 'bg-white dark:bg-zinc-800 text-black dark:text-white shadow-sm' : 'text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-300'}`}
-            >
-              Simple
-            </button>
-            <button
-              onClick={() => { setCreateMode('custom'); setLegoValidationError(''); setCoverValidationError(''); }}
-              className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-all ${createMode === 'custom' ? 'bg-white dark:bg-zinc-800 text-black dark:text-white shadow-sm' : 'text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-300'}`}
-            >
-              Custom
-            </button>
-            <button
-              onClick={() => { setCreateMode('cover'); setLegoValidationError(''); setCoverValidationError(''); }}
-              className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-all ${createMode === 'cover' ? 'bg-white dark:bg-zinc-800 text-black dark:text-white shadow-sm' : 'text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-300'}`}
-            >
-              Cover
-            </button>
-            <button
-              onClick={() => {
-                setCreateMode('lego');
-                setLegoValidationError('');
-                setCoverValidationError('');
-                preferencesApi.update({ ace_step_dit_model: 'base' }).catch(() => {});
-              }}
-              className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-all ${createMode === 'lego' ? 'bg-white dark:bg-zinc-800 text-black dark:text-white shadow-sm' : 'text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-300'}`}
-            >
-              Lego
-            </button>
+        {/* Header - Backend Selector + Credits + Mode Toggle */}
+        <div className="space-y-3">
+          {/* Backend Selector */}
+          <BackendSelector backend={backend} onBackendChange={setBackend} />
+
+          {/* Suno Credits (when Suno backend) */}
+          {isSuno && (
+            <div className="flex items-center justify-end">
+              <CreditsDisplay
+                compact
+                onCreditsUpdate={(c) => setSunoCredits(c)}
+              />
+            </div>
+          )}
+
+          {/* Mode Toggle — hide Lego when Suno (Suno doesn't support lego) */}
+          <div className="flex items-center justify-end">
+            <div className="flex items-center bg-zinc-200 dark:bg-black/40 rounded-lg p-1 border border-zinc-300 dark:border-white/5">
+              <button
+                onClick={() => { setCreateMode('simple'); setLegoValidationError(''); setCoverValidationError(''); }}
+                className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-all ${createMode === 'simple' ? 'bg-white dark:bg-zinc-800 text-black dark:text-white shadow-sm' : 'text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-300'}`}
+              >
+                Simple
+              </button>
+              <button
+                onClick={() => { setCreateMode('custom'); setLegoValidationError(''); setCoverValidationError(''); }}
+                className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-all ${createMode === 'custom' ? 'bg-white dark:bg-zinc-800 text-black dark:text-white shadow-sm' : 'text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-300'}`}
+              >
+                Custom
+              </button>
+              <button
+                onClick={() => { setCreateMode('cover'); setLegoValidationError(''); setCoverValidationError(''); }}
+                className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-all ${createMode === 'cover' ? 'bg-white dark:bg-zinc-800 text-black dark:text-white shadow-sm' : 'text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-300'}`}
+              >
+                Cover
+              </button>
+              {!isSuno && (
+                <button
+                  onClick={() => {
+                    setCreateMode('lego');
+                    setLegoValidationError('');
+                    setCoverValidationError('');
+                    preferencesApi.update({ ace_step_dit_model: 'base' }).catch(() => {});
+                  }}
+                  className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-all ${createMode === 'lego' ? 'bg-white dark:bg-zinc-800 text-black dark:text-white shadow-sm' : 'text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-300'}`}
+                >
+                  Lego
+                </button>
+              )}
+            </div>
           </div>
         </div>
 
         {/* SIMPLE MODE */}
         {createMode === 'simple' && (
           <div className="space-y-5">
+            {/* Suno Model Selector (when Suno backend) */}
+            {isSuno && (
+              <SunoModelSelector model={sunoModel} onModelChange={(m) => setSunoModel(m as SunoModel)} />
+            )}
+
+            {/* Suno Vocal Gender (when Suno backend + model supports it) */}
+            {isSuno && (() => {
+              const modelInfo = SUNO_MODELS.find(m => m.id === sunoModel);
+              return modelInfo?.supportsGender ? (
+                <div className="bg-white dark:bg-suno-card rounded-xl border border-zinc-200 dark:border-white/5 overflow-hidden">
+                  <div className="px-3 py-2.5 text-xs font-bold uppercase tracking-wide text-zinc-500 dark:text-zinc-400 border-b border-zinc-100 dark:border-white/5 bg-zinc-50 dark:bg-white/5 flex items-center gap-1.5">
+                    Vocal Gender
+                    <InfoTooltip text="Choose the vocal character for the generated song. Only available on select Suno models." />
+                  </div>
+                  <div className="p-3 flex gap-2">
+                    {(['', 'm', 'f'] as const).map((g) => (
+                      <button
+                        key={g || 'auto'}
+                        type="button"
+                        onClick={() => setVocalGender(g)}
+                        className={`flex-1 py-2 rounded-lg text-xs font-semibold transition-colors ${
+                          vocalGender === g
+                            ? 'bg-pink-600 text-white'
+                            : 'bg-zinc-100 dark:bg-black/30 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200 dark:hover:bg-white/10'
+                        }`}
+                      >
+                        {g === '' ? 'Auto' : g === 'm' ? '♂ Male' : '♀ Female'}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : null;
+            })()}
+
             {/* Title (same as Custom mode) */}
             <div className="bg-white dark:bg-suno-card rounded-xl border border-zinc-200 dark:border-white/5 overflow-hidden">
               <div className="px-3 py-2.5 text-xs font-bold uppercase tracking-wide text-zinc-500 dark:text-zinc-400 border-b border-zinc-100 dark:border-white/5 bg-zinc-50 dark:bg-white/5">
@@ -1094,14 +1212,26 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
                 </div>
                 <textarea
                   value={style}
-                  onChange={(e) => setStyle(e.target.value)}
-                  placeholder="e.g. A happy pop song about summer... or use a genre preset above"
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    if (isSuno && val.length > modelLimits.prompt) return;
+                    setStyle(val);
+                  }}
+                  placeholder={isSuno ? "Describe the music style, mood, instruments, genre..." : "e.g. A happy pop song about summer... or use a genre preset above"}
                   className="w-full h-28 bg-transparent text-sm text-zinc-900 dark:text-white placeholder-zinc-400 dark:placeholder-zinc-600 focus:outline-none resize-none border-0 p-0"
                 />
+                {isSuno && (
+                  <div className="flex justify-end">
+                    <span className={`text-[10px] font-mono ${style.length > modelLimits.prompt * 0.9 ? 'text-amber-500' : 'text-zinc-400'}`}>
+                      {style.length}/{modelLimits.prompt}
+                    </span>
+                  </div>
+                )}
               </div>
             </div>
 
-            {/* Vocal Language (Simple) */}
+            {/* Vocal Language (Simple) — ACE-Step only; Suno uses vocal gender above */}
+            {!isSuno && (
             <div className="bg-white dark:bg-suno-card rounded-xl border border-zinc-200 dark:border-white/5 overflow-hidden">
               <div className="px-3 py-2.5 text-xs font-bold uppercase tracking-wide text-zinc-500 dark:text-zinc-400 border-b border-zinc-100 dark:border-white/5 bg-zinc-50 dark:bg-white/5">
                 Vocal Language
@@ -1116,8 +1246,10 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
                 ))}
               </select>
             </div>
+            )}
 
-            {/* Quality preset (Simple + Advanced) — Basic / Great / Best from ACE-Step docs */}
+            {/* Quality preset (Simple + Advanced) — Basic / Great / Best from ACE-Step docs; not for Suno */}
+            {!isSuno && (
             <div className="bg-white dark:bg-suno-card rounded-xl border border-zinc-200 dark:border-white/5 overflow-hidden">
               <div className="px-3 py-2.5 text-xs font-bold uppercase tracking-wide text-zinc-500 dark:text-zinc-400 border-b border-zinc-100 dark:border-white/5 bg-zinc-50 dark:bg-white/5 flex items-center gap-1.5">
                 Quality
@@ -1140,24 +1272,43 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
                 ))}
               </div>
             </div>
+            )}
 
-            {/* Exclude styles (Suno-like negative prompt) — right above sliders */}
-            <div className="bg-white dark:bg-suno-card rounded-xl border border-zinc-200 dark:border-white/5 overflow-hidden">
-              <div className="px-3 py-2.5 flex items-center gap-2">
-                <Wrench size={14} className="text-zinc-500 dark:text-zinc-400 shrink-0" />
-                <label className="text-xs font-medium text-zinc-600 dark:text-zinc-400">Exclude styles</label>
-                <InfoTooltip text="Things to avoid in the output (e.g. genres, instruments, mood). Added as negative guidance." />
+            {/* Exclude styles / Negative tags */}
+            {isSuno ? (
+              <div className="bg-white dark:bg-suno-card rounded-xl border border-zinc-200 dark:border-white/5 overflow-hidden">
+                <div className="px-3 py-2.5 flex items-center gap-2">
+                  <Wrench size={14} className="text-zinc-500 dark:text-zinc-400 shrink-0" />
+                  <label className="text-xs font-medium text-zinc-600 dark:text-zinc-400">Negative tags</label>
+                  <InfoTooltip text="Tags to avoid in the generated music (e.g. genres, instruments, mood). Suno API negative_tags parameter." />
+                </div>
+                <input
+                  type="text"
+                  value={negativeTags}
+                  onChange={(e) => setNegativeTags(e.target.value)}
+                  placeholder="e.g. heavy distortion, screaming, autotune"
+                  className="w-full bg-transparent px-3 pb-3 pt-0 text-sm text-zinc-900 dark:text-white placeholder-zinc-400 dark:placeholder-zinc-600 focus:outline-none border-0"
+                />
               </div>
-              <input
-                type="text"
-                value={negativePrompt}
-                onChange={(e) => setNegativePrompt(e.target.value)}
-                placeholder="e.g. heavy distortion, screaming"
-                className="w-full bg-transparent px-3 pb-3 pt-0 text-sm text-zinc-900 dark:text-white placeholder-zinc-400 dark:placeholder-zinc-600 focus:outline-none border-0"
-              />
-            </div>
+            ) : (
+              <div className="bg-white dark:bg-suno-card rounded-xl border border-zinc-200 dark:border-white/5 overflow-hidden">
+                <div className="px-3 py-2.5 flex items-center gap-2">
+                  <Wrench size={14} className="text-zinc-500 dark:text-zinc-400 shrink-0" />
+                  <label className="text-xs font-medium text-zinc-600 dark:text-zinc-400">Exclude styles</label>
+                  <InfoTooltip text="Things to avoid in the output (e.g. genres, instruments, mood). Added as negative guidance." />
+                </div>
+                <input
+                  type="text"
+                  value={negativePrompt}
+                  onChange={(e) => setNegativePrompt(e.target.value)}
+                  placeholder="e.g. heavy distortion, screaming"
+                  className="w-full bg-transparent px-3 pb-3 pt-0 text-sm text-zinc-900 dark:text-white placeholder-zinc-400 dark:placeholder-zinc-600 focus:outline-none border-0"
+                />
+              </div>
+            )}
 
-            {/* SUNO-like influence sliders (Simple): Weirdness, Style Influence, Audio Influence */}
+            {/* Generation influence sliders — ACE-Step */}
+            {!isSuno && (
             <div className="bg-white dark:bg-suno-card rounded-xl border border-zinc-200 dark:border-white/5 p-4 space-y-4">
               <h3 className="text-xs font-bold text-zinc-500 dark:text-zinc-400 uppercase tracking-wide flex items-center gap-2">
                 <Sliders size={14} />
@@ -1224,8 +1375,58 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
                 </div>
               )}
             </div>
+            )}
 
-            {/* Reference & cover (optional) — same as Custom but compact; no hidden features */}
+            {/* Suno generation weights — Suno only */}
+            {isSuno && (
+            <div className="bg-white dark:bg-suno-card rounded-xl border border-zinc-200 dark:border-white/5 p-4 space-y-4">
+              <h3 className="text-xs font-bold text-zinc-500 dark:text-zinc-400 uppercase tracking-wide flex items-center gap-2">
+                <Sliders size={14} />
+                Suno generation weights
+              </h3>
+
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="inline-flex items-center gap-1.5">
+                    <label className="text-xs font-medium text-zinc-600 dark:text-zinc-400">Style weight</label>
+                    <InfoTooltip text="How strongly the style/prompt is followed. Higher = closer to your description. (Suno styleWeight)" />
+                  </span>
+                  <span className="text-xs font-mono text-zinc-900 dark:text-white bg-zinc-100 dark:bg-black/20 px-2 py-0.5 rounded">{styleWeight.toFixed(2)}</span>
+                </div>
+                <input
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.05"
+                  value={styleWeight}
+                  onChange={(e) => setStyleWeight(Number(e.target.value))}
+                  className="w-full h-2 bg-zinc-200 dark:bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-pink-500"
+                />
+              </div>
+
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="inline-flex items-center gap-1.5">
+                    <label className="text-xs font-medium text-zinc-600 dark:text-zinc-400">Weirdness constraint</label>
+                    <InfoTooltip text="How creative/experimental the generation is. Higher = more experimental. (Suno weirdnessConstraint)" />
+                  </span>
+                  <span className="text-xs font-mono text-zinc-900 dark:text-white bg-zinc-100 dark:bg-black/20 px-2 py-0.5 rounded">{weirdnessConstraint.toFixed(2)}</span>
+                </div>
+                <input
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.05"
+                  value={weirdnessConstraint}
+                  onChange={(e) => setWeirdnessConstraint(Number(e.target.value))}
+                  className="w-full h-2 bg-zinc-200 dark:bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-pink-500"
+                />
+              </div>
+            </div>
+            )}
+
+            {/* Reference & cover (optional) — ACE-Step only; Suno doesn't use local reference tracks */}
+            {!isSuno && (
             <div className="bg-white dark:bg-suno-card rounded-xl border border-zinc-200 dark:border-white/5 p-4 space-y-3">
               <h3 className="text-xs font-bold text-zinc-500 dark:text-zinc-400 uppercase tracking-wide">Reference & cover (optional)</h3>
               <p className="text-[11px] text-zinc-500 dark:text-zinc-400">Use a style reference or a song to cover. Leave empty to generate from your description only.</p>
@@ -1254,12 +1455,13 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
                 </div>
               </div>
             </div>
+            )}
 
             {/* Quick Settings (Simple Mode) */}
             <div className="bg-white dark:bg-suno-card rounded-xl border border-zinc-200 dark:border-white/5 p-4 space-y-4">
               <h3 className="text-xs font-bold text-zinc-500 dark:text-zinc-400 uppercase tracking-wide flex items-center gap-2">
                 <Sliders size={14} />
-                Quick Settings
+                {isSuno ? 'Suno Settings' : 'Quick Settings'}
               </h3>
 
               {/* Duration */}
@@ -1281,7 +1483,52 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
                 />
               </div>
 
-              {/* BPM */}
+              {/* Suno: Persona ID (optional) */}
+              {isSuno && (
+                <div className="space-y-1.5">
+                  <span className="inline-flex items-center gap-1.5">
+                    <label className="text-xs font-medium text-zinc-600 dark:text-zinc-400">Persona ID (optional)</label>
+                    <InfoTooltip text="Apply a Suno persona (style or voice) to the generation. Get persona IDs from the Suno API." />
+                  </span>
+                  <input
+                    type="text"
+                    value={personaId}
+                    onChange={(e) => setPersonaId(e.target.value)}
+                    placeholder="e.g. persona_abc123"
+                    className="w-full bg-zinc-50 dark:bg-black/20 border border-zinc-200 dark:border-white/10 rounded-lg px-3 py-2 text-xs text-zinc-900 dark:text-white focus:outline-none"
+                  />
+                  {personaId && (
+                    <select
+                      value={personaModel}
+                      onChange={(e) => setPersonaModel(e.target.value as 'style_persona' | 'voice_persona')}
+                      className="w-full bg-zinc-50 dark:bg-black/20 border border-zinc-200 dark:border-white/10 rounded-lg px-2 py-1.5 text-xs text-zinc-900 dark:text-white focus:outline-none"
+                    >
+                      <option value="style_persona">Style Persona</option>
+                      <option value="voice_persona">Voice Persona</option>
+                    </select>
+                  )}
+                </div>
+              )}
+
+              {/* Suno: Custom Seed (optional) */}
+              {isSuno && (
+                <div className="space-y-1.5">
+                  <span className="inline-flex items-center gap-1.5">
+                    <label className="text-xs font-medium text-zinc-600 dark:text-zinc-400">Custom Seed (optional)</label>
+                    <InfoTooltip text="Optional seed for reproducible Suno generations. Leave empty for random." />
+                  </span>
+                  <input
+                    type="text"
+                    value={customSeed}
+                    onChange={(e) => setCustomSeed(e.target.value)}
+                    placeholder="e.g. my-seed-123"
+                    className="w-full bg-zinc-50 dark:bg-black/20 border border-zinc-200 dark:border-white/10 rounded-lg px-3 py-2 text-xs text-zinc-900 dark:text-white focus:outline-none"
+                  />
+                </div>
+              )}
+
+              {/* BPM — ACE-Step only */}
+              {!isSuno && (
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
                   <label className="text-xs font-medium text-zinc-600 dark:text-zinc-400">BPM</label>
@@ -1299,8 +1546,10 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
                   className="w-full h-2 bg-zinc-200 dark:bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-pink-500"
                 />
               </div>
+              )}
 
-              {/* Key & Time Signature */}
+              {/* Key & Time Signature — ACE-Step only */}
+              {!isSuno && (
               <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-1.5">
                   <label className="text-xs font-medium text-zinc-600 dark:text-zinc-400">Key</label>
@@ -1329,8 +1578,10 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
                   </select>
                 </div>
               </div>
+              )}
 
-              {/* Variations */}
+              {/* Variations — ACE-Step only (Suno generates 2 songs per request) */}
+              {!isSuno && (
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
                   <label className="text-xs font-medium text-zinc-600 dark:text-zinc-400">Variations</label>
@@ -1347,6 +1598,7 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
                 />
                 <p className="text-[10px] text-zinc-500">Number of song variations to generate</p>
               </div>
+              )}
             </div>
           </div>
         )}
@@ -1356,88 +1608,228 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
           <div className="space-y-5">
             <div className="bg-white dark:bg-suno-card rounded-xl border border-zinc-200 dark:border-white/5 p-4">
               <p className="text-sm text-zinc-600 dark:text-zinc-400">
-                Generate a new version of your source audio in a different style. One source + one style description (e.g. &quot;jazz piano cover with swing rhythm&quot;). No semantic blending — pure cover task.
+                {isSuno
+                  ? 'Generate a cover of an existing song using Suno AI. Provide the song URL or describe the original, then specify your desired style.'
+                  : 'Generate a new version of your source audio in a different style. One source + one style description (e.g. "jazz piano cover with swing rhythm"). No semantic blending — pure cover task.'}
               </p>
             </div>
+
+            {/* Suno Model Selector (Cover mode — Suno only) */}
+            {isSuno && (
+              <SunoModelSelector
+                selectedModel={sunoModel}
+                onModelChange={setSunoModel}
+              />
+            )}
+
+            {/* Suno Vocal Gender (Cover mode — Suno only, when model supports it) */}
+            {isSuno && SUNO_MODEL_INFO[sunoModel]?.supportsGender && (
+              <div className="bg-white dark:bg-suno-card rounded-xl border border-zinc-200 dark:border-white/5 overflow-hidden">
+                <div className="px-3 py-2.5 text-xs font-bold uppercase tracking-wide text-zinc-500 dark:text-zinc-400 border-b border-zinc-100 dark:border-white/5 bg-zinc-50 dark:bg-white/5">
+                  Vocal Gender
+                </div>
+                <div className="p-3 flex gap-2">
+                  {(['Auto', 'Male', 'Female'] as const).map((g) => (
+                    <button
+                      key={g}
+                      type="button"
+                      onClick={() => setVocalGender(g === 'Auto' ? 'Auto' : g.toLowerCase() as 'male' | 'female')}
+                      className={`flex-1 py-2 rounded-lg text-xs font-semibold transition-colors ${
+                        (g === 'Auto' && vocalGender === 'Auto') || (g !== 'Auto' && vocalGender === g.toLowerCase())
+                          ? 'bg-pink-500 text-white'
+                          : 'bg-zinc-100 dark:bg-white/5 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200 dark:hover:bg-white/10'
+                      }`}
+                    >
+                      {g}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {/* Title (optional) */}
             <div className="bg-white dark:bg-suno-card rounded-xl border border-zinc-200 dark:border-white/5 overflow-hidden">
               <div className="px-3 py-2.5 text-xs font-bold uppercase tracking-wide text-zinc-500 dark:text-zinc-400 border-b border-zinc-100 dark:border-white/5 bg-zinc-50 dark:bg-white/5">
-                Title (optional)
+                <div className="flex items-center justify-between">
+                  <span>Title (optional)</span>
+                  {isSuno && (
+                    <span className="text-[10px] font-mono text-zinc-400">{title.length}/{modelLimits.title}</span>
+                  )}
+                </div>
               </div>
               <input
                 type="text"
                 value={title}
-                onChange={(e) => setTitle(e.target.value)}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  if (isSuno && val.length > modelLimits.title) return;
+                  setTitle(val);
+                }}
                 placeholder="Name the output"
                 className="w-full bg-transparent p-3 text-sm text-zinc-900 dark:text-white placeholder-zinc-400 dark:placeholder-zinc-600 focus:outline-none"
               />
             </div>
 
-            {/* Source audio (required) */}
-            <div className="bg-white dark:bg-suno-card rounded-xl border border-zinc-200 dark:border-white/5 overflow-hidden">
-              <div className="px-3 py-2.5 text-xs font-bold uppercase tracking-wide text-zinc-500 dark:text-zinc-400 border-b border-zinc-100 dark:border-white/5 bg-zinc-50 dark:bg-white/5 flex items-center gap-1.5">
-                Source audio
-                <span className="text-red-500">*</span>
-                <InfoTooltip text="The audio to re-style (cover). Required." />
-              </div>
-              <div className="p-3 space-y-2">
-                <div className="flex gap-2">
-                  <button type="button" onClick={() => openAudioModal('source')} className="flex-1 flex items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-xs font-medium bg-zinc-100 dark:bg-white/5 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-white/10 transition-colors">
-                    Choose from library
-                  </button>
+            {/* Source audio (ACE-Step: from library) or Song URL (Suno: URL input) */}
+            {isSuno ? (
+              /* Suno cover: Song URL input */
+              <div className="bg-white dark:bg-suno-card rounded-xl border border-zinc-200 dark:border-white/5 overflow-hidden">
+                <div className="px-3 py-2.5 text-xs font-bold uppercase tracking-wide text-zinc-500 dark:text-zinc-400 border-b border-zinc-100 dark:border-white/5 bg-zinc-50 dark:bg-white/5 flex items-center gap-1.5">
+                  Song URL
+                  <span className="text-red-500">*</span>
+                  <InfoTooltip text="The URL of the original Suno song to cover (e.g. https://suno.com/song/xxxxx)." />
                 </div>
-                <p className="text-[11px] text-zinc-500 dark:text-zinc-400">Pick a track from your library or upload in the picker (uploads go to the library).</p>
-                {sourceAudioUrl ? (
-                  <p className="text-xs text-emerald-600 dark:text-emerald-400 truncate" title={sourceAudioUrl}>{getAudioLabel(sourceAudioUrl)}</p>
-                ) : (
-                  <p className="text-xs text-zinc-400 italic">No source audio selected</p>
-                )}
+                <input
+                  type="text"
+                  value={sourceAudioUrl}
+                  onChange={(e) => setSourceAudioUrl(e.target.value)}
+                  placeholder="https://suno.com/song/..."
+                  className="w-full bg-transparent p-3 text-sm text-zinc-900 dark:text-white placeholder-zinc-400 dark:placeholder-zinc-600 focus:outline-none"
+                />
               </div>
-            </div>
+            ) : (
+              /* ACE-Step cover: Source audio from library */
+              <div className="bg-white dark:bg-suno-card rounded-xl border border-zinc-200 dark:border-white/5 overflow-hidden">
+                <div className="px-3 py-2.5 text-xs font-bold uppercase tracking-wide text-zinc-500 dark:text-zinc-400 border-b border-zinc-100 dark:border-white/5 bg-zinc-50 dark:bg-white/5 flex items-center gap-1.5">
+                  Source audio
+                  <span className="text-red-500">*</span>
+                  <InfoTooltip text="The audio to re-style (cover). Required." />
+                </div>
+                <div className="p-3 space-y-2">
+                  <div className="flex gap-2">
+                    <button type="button" onClick={() => openAudioModal('source')} className="flex-1 flex items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-xs font-medium bg-zinc-100 dark:bg-white/5 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-white/10 transition-colors">
+                      Choose from library
+                    </button>
+                  </div>
+                  <p className="text-[11px] text-zinc-500 dark:text-zinc-400">Pick a track from your library or upload in the picker (uploads go to the library).</p>
+                  {sourceAudioUrl ? (
+                    <p className="text-xs text-emerald-600 dark:text-emerald-400 truncate" title={sourceAudioUrl}>{getAudioLabel(sourceAudioUrl)}</p>
+                  ) : (
+                    <p className="text-xs text-zinc-400 italic">No source audio selected</p>
+                  )}
+                </div>
+              </div>
+            )}
 
             {/* Cover style (caption) */}
             <div className="bg-white dark:bg-suno-card rounded-xl border border-zinc-200 dark:border-white/5 overflow-hidden">
               <div className="px-3 py-2.5 text-xs font-bold uppercase tracking-wide text-zinc-500 dark:text-zinc-400 border-b border-zinc-100 dark:border-white/5 bg-zinc-50 dark:bg-white/5 flex items-center gap-1.5">
-                Cover style
-                <span className="text-red-500">*</span>
-                <InfoTooltip text="Describe the target style (e.g. jazz piano cover with swing rhythm, orchestral version, lo-fi hip hop)." />
+                <div className="flex items-center justify-between flex-1">
+                  <span className="inline-flex items-center gap-1.5">
+                    Cover style
+                    <span className="text-red-500">*</span>
+                    <InfoTooltip text={isSuno ? "Describe the target style for your cover (e.g. jazz piano, orchestral, lo-fi hip hop)." : "Describe the target style (e.g. jazz piano cover with swing rhythm, orchestral version, lo-fi hip hop)."} />
+                  </span>
+                  {isSuno && (
+                    <span className="text-[10px] font-mono text-zinc-400">{coverCaption.length}/{modelLimits.style}</span>
+                  )}
+                </div>
               </div>
               <textarea
                 value={coverCaption}
-                onChange={(e) => setCoverCaption(e.target.value)}
-                placeholder="e.g. jazz piano cover with swing rhythm"
+                onChange={(e) => {
+                  const val = e.target.value;
+                  if (isSuno && val.length > modelLimits.style) return;
+                  setCoverCaption(val);
+                }}
+                placeholder={isSuno ? "e.g. jazz piano, orchestral, lo-fi hip hop" : "e.g. jazz piano cover with swing rhythm"}
                 className="w-full h-24 bg-transparent p-3 text-sm text-zinc-900 dark:text-white placeholder-zinc-400 dark:placeholder-zinc-600 focus:outline-none resize-none"
               />
             </div>
 
-            {/* Cover strength */}
-            <div className="bg-white dark:bg-suno-card rounded-xl border border-zinc-200 dark:border-white/5 overflow-hidden">
-              <div className="px-3 py-2.5 text-xs font-bold uppercase tracking-wide text-zinc-500 dark:text-zinc-400 border-b border-zinc-100 dark:border-white/5 bg-zinc-50 dark:bg-white/5 flex items-center gap-1.5">
-                Source influence
-                <InfoTooltip text="How much the output follows the source (1 = strong adherence, lower = more influence from your cover style)." />
-              </div>
-              <div className="p-3 space-y-2">
-                <div className="flex items-center justify-between gap-2">
+            {/* Suno-specific cover fields */}
+            {isSuno && (
+              <>
+                {/* Negative tags (Suno cover) */}
+                <div className="bg-white dark:bg-suno-card rounded-xl border border-zinc-200 dark:border-white/5 overflow-hidden">
+                  <div className="px-3 py-2.5 text-xs font-bold uppercase tracking-wide text-zinc-500 dark:text-zinc-400 border-b border-zinc-100 dark:border-white/5 bg-zinc-50 dark:bg-white/5">
+                    Negative Tags (optional)
+                  </div>
                   <input
-                    type="range"
-                    min="0"
-                    max="1"
-                    step="0.05"
-                    value={coverStrength}
-                    onChange={(e) => setCoverStrength(Number(e.target.value))}
-                    className="flex-1 h-2 bg-zinc-200 dark:bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-pink-500"
+                    type="text"
+                    value={negativeTags}
+                    onChange={(e) => setNegativeTags(e.target.value)}
+                    placeholder="e.g. heavy distortion, screaming, autotune"
+                    className="w-full bg-transparent p-3 text-sm text-zinc-900 dark:text-white placeholder-zinc-400 dark:placeholder-zinc-600 focus:outline-none"
                   />
-                  <span className="text-xs font-mono text-zinc-900 dark:text-white bg-zinc-100 dark:bg-black/20 px-2 py-1 rounded shrink-0 w-12 text-right">
-                    {coverStrength.toFixed(2)}
-                  </span>
                 </div>
-                <div className="flex justify-between text-[10px] text-zinc-500">
-                  <span>0 — style only</span>
-                  <span>1 — strong source</span>
+
+                {/* Style Weight & Weirdness Constraint (Suno cover) */}
+                <div className="bg-white dark:bg-suno-card rounded-xl border border-zinc-200 dark:border-white/5 overflow-hidden">
+                  <div className="px-3 py-2.5 text-xs font-bold uppercase tracking-wide text-zinc-500 dark:text-zinc-400 border-b border-zinc-100 dark:border-white/5 bg-zinc-50 dark:bg-white/5">
+                    Suno Style Controls
+                  </div>
+                  <div className="p-3 space-y-4">
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="inline-flex items-center gap-1.5">
+                          <label className="text-xs font-medium text-zinc-600 dark:text-zinc-400">Style Weight</label>
+                          <InfoTooltip text="How strongly the style prompt influences the generation (0–1). Higher = more faithful to the style description." />
+                        </span>
+                        <span className="text-xs font-mono text-zinc-900 dark:text-white bg-zinc-100 dark:bg-black/20 px-2 py-0.5 rounded">{styleWeight.toFixed(2)}</span>
+                      </div>
+                      <input
+                        type="range"
+                        min="0"
+                        max="1"
+                        step="0.05"
+                        value={styleWeight}
+                        onChange={(e) => setStyleWeight(Number(e.target.value))}
+                        className="w-full h-2 bg-zinc-200 dark:bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-pink-500"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="inline-flex items-center gap-1.5">
+                          <label className="text-xs font-medium text-zinc-600 dark:text-zinc-400">Weirdness Constraint</label>
+                          <InfoTooltip text="Controls how unconventional the output can be (0–1). 0 = conventional, 1 = maximum weirdness/experimentation." />
+                        </span>
+                        <span className="text-xs font-mono text-zinc-900 dark:text-white bg-zinc-100 dark:bg-black/20 px-2 py-0.5 rounded">{weirdnessConstraint.toFixed(2)}</span>
+                      </div>
+                      <input
+                        type="range"
+                        min="0"
+                        max="1"
+                        step="0.05"
+                        value={weirdnessConstraint}
+                        onChange={(e) => setWeirdnessConstraint(Number(e.target.value))}
+                        className="w-full h-2 bg-zinc-200 dark:bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-pink-500"
+                      />
+                    </div>
+                  </div>
+                </div>
+              </>
+            )}
+
+            {/* ACE-Step: Cover strength (not for Suno) */}
+            {!isSuno && (
+              <div className="bg-white dark:bg-suno-card rounded-xl border border-zinc-200 dark:border-white/5 overflow-hidden">
+                <div className="px-3 py-2.5 text-xs font-bold uppercase tracking-wide text-zinc-500 dark:text-zinc-400 border-b border-zinc-100 dark:border-white/5 bg-zinc-50 dark:bg-white/5 flex items-center gap-1.5">
+                  Source influence
+                  <InfoTooltip text="How much the output follows the source (1 = strong adherence, lower = more influence from your cover style)." />
+                </div>
+                <div className="p-3 space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <input
+                      type="range"
+                      min="0"
+                      max="1"
+                      step="0.05"
+                      value={coverStrength}
+                      onChange={(e) => setCoverStrength(Number(e.target.value))}
+                      className="flex-1 h-2 bg-zinc-200 dark:bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-pink-500"
+                    />
+                    <span className="text-xs font-mono text-zinc-900 dark:text-white bg-zinc-100 dark:bg-black/20 px-2 py-1 rounded shrink-0 w-12 text-right">
+                      {coverStrength.toFixed(2)}
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-[10px] text-zinc-500">
+                    <span>0 — style only</span>
+                    <span>1 — strong source</span>
+                  </div>
                 </div>
               </div>
-            </div>
+            )}
 
             {/* Instrumental / Lyrics override for cover */}
             <div className="bg-white dark:bg-suno-card rounded-xl border border-zinc-200 dark:border-white/5 overflow-hidden">
@@ -1467,79 +1859,83 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
               </div>
             </div>
 
-            {/* Optional: Blend with second audio */}
-            <div className="bg-white dark:bg-suno-card rounded-xl border border-zinc-200 dark:border-white/5 overflow-hidden">
-              <div className="px-3 py-2.5 text-xs font-bold uppercase tracking-wide text-zinc-500 dark:text-zinc-400 border-b border-zinc-100 dark:border-white/5 bg-zinc-50 dark:bg-white/5 flex items-center gap-1.5">
-                Optional: Blend with a second audio
-                <InfoTooltip text="Add a second track to blend structure (source) with style/timbre from another. Leave empty for a single-source cover." />
-              </div>
-              <div className="p-3 space-y-3">
-                <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                  Combine the source above with another track: structure and length follow the source; style can follow the second audio.
-                </p>
-                <div className="flex gap-2">
-                  <button type="button" onClick={() => openAudioModal('cover_style')} className="flex-1 flex items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-xs font-medium bg-zinc-100 dark:bg-white/5 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-white/10 transition-colors">
-                    Choose from library
-                  </button>
+            {/* ACE-Step: Blend with second audio (not for Suno) */}
+            {!isSuno && (
+              <div className="bg-white dark:bg-suno-card rounded-xl border border-zinc-200 dark:border-white/5 overflow-hidden">
+                <div className="px-3 py-2.5 text-xs font-bold uppercase tracking-wide text-zinc-500 dark:text-zinc-400 border-b border-zinc-100 dark:border-white/5 bg-zinc-50 dark:bg-white/5 flex items-center gap-1.5">
+                  Optional: Blend with a second audio
+                  <InfoTooltip text="Add a second track to blend structure (source) with style/timbre from another. Leave empty for a single-source cover." />
                 </div>
-                <p className="text-[11px] text-zinc-500 dark:text-zinc-400">Pick from library or upload in the picker (uploads go to the library).</p>
-                {coverStyleAudioUrl ? (
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <p className="text-xs text-emerald-600 dark:text-emerald-400 truncate flex-1 min-w-0" title={coverStyleAudioUrl}>{getAudioLabel(coverStyleAudioUrl)}</p>
-                    <button type="button" onClick={() => setCoverStyleAudioUrl('')} className="shrink-0 px-2 py-1 text-[11px] font-medium rounded bg-zinc-200 dark:bg-white/10 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-300 dark:hover:bg-white/20">
-                      Clear
+                <div className="p-3 space-y-3">
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                    Combine the source above with another track: structure and length follow the source; style can follow the second audio.
+                  </p>
+                  <div className="flex gap-2">
+                    <button type="button" onClick={() => openAudioModal('cover_style')} className="flex-1 flex items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-xs font-medium bg-zinc-100 dark:bg-white/5 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-white/10 transition-colors">
+                      Choose from library
                     </button>
                   </div>
-                ) : (
-                  <p className="text-xs text-zinc-400 italic">No style audio — single-source cover</p>
-                )}
-                {coverStyleAudioUrl && (
-                  <div className="pt-2 border-t border-zinc-100 dark:border-white/5 space-y-2">
-                    <label className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400">Blend: source vs style</label>
-                    <div className="flex items-center justify-between gap-2">
-                      <input
-                        type="range"
-                        min="0"
-                        max="1"
-                        step="0.05"
-                        value={coverBlendFactor}
-                        onChange={(e) => setCoverBlendFactor(Number(e.target.value))}
-                        className="flex-1 h-2 bg-zinc-200 dark:bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-pink-500"
-                      />
-                      <span className="text-xs font-mono text-zinc-900 dark:text-white bg-zinc-100 dark:bg-black/20 px-2 py-1 rounded shrink-0 w-12 text-right">
-                        {coverBlendFactor.toFixed(2)}
-                      </span>
+                  <p className="text-[11px] text-zinc-500 dark:text-zinc-400">Pick from library or upload in the picker (uploads go to the library).</p>
+                  {coverStyleAudioUrl ? (
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <p className="text-xs text-emerald-600 dark:text-emerald-400 truncate flex-1 min-w-0" title={coverStyleAudioUrl}>{getAudioLabel(coverStyleAudioUrl)}</p>
+                      <button type="button" onClick={() => setCoverStyleAudioUrl('')} className="shrink-0 px-2 py-1 text-[11px] font-medium rounded bg-zinc-200 dark:bg-white/10 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-300 dark:hover:bg-white/20">
+                        Clear
+                      </button>
                     </div>
-                    <div className="flex justify-between text-[10px] text-zinc-500">
-                      <span>0 — more source</span>
-                      <span>1 — more style</span>
+                  ) : (
+                    <p className="text-xs text-zinc-400 italic">No style audio — single-source cover</p>
+                  )}
+                  {coverStyleAudioUrl && (
+                    <div className="pt-2 border-t border-zinc-100 dark:border-white/5 space-y-2">
+                      <label className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400">Blend: source vs style</label>
+                      <div className="flex items-center justify-between gap-2">
+                        <input
+                          type="range"
+                          min="0"
+                          max="1"
+                          step="0.05"
+                          value={coverBlendFactor}
+                          onChange={(e) => setCoverBlendFactor(Number(e.target.value))}
+                          className="flex-1 h-2 bg-zinc-200 dark:bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-pink-500"
+                        />
+                        <span className="text-xs font-mono text-zinc-900 dark:text-white bg-zinc-100 dark:bg-black/20 px-2 py-1 rounded shrink-0 w-12 text-right">
+                          {coverBlendFactor.toFixed(2)}
+                        </span>
+                      </div>
+                      <div className="flex justify-between text-[10px] text-zinc-500">
+                        <span>0 — more source</span>
+                        <span>1 — more style</span>
+                      </div>
                     </div>
-                  </div>
-                )}
+                  )}
+                </div>
               </div>
-            </div>
+            )}
 
-            {/* Quality preset */}
-            <div className="bg-white dark:bg-suno-card rounded-xl border border-zinc-200 dark:border-white/5 overflow-hidden">
-              <div className="px-3 py-2.5 text-xs font-bold uppercase tracking-wide text-zinc-500 dark:text-zinc-400 border-b border-zinc-100 dark:border-white/5 bg-zinc-50 dark:bg-white/5 flex items-center gap-1.5">
-                Quality
-                <InfoTooltip text="Basic: fast. Great: balanced. Best: maximum quality." />
+            {/* ACE-Step: Quality preset (not for Suno) */}
+            {!isSuno && (
+              <div className="bg-white dark:bg-suno-card rounded-xl border border-zinc-200 dark:border-white/5 overflow-hidden">
+                <div className="px-3 py-2.5 text-xs font-bold uppercase tracking-wide text-zinc-500 dark:text-zinc-400 border-b border-zinc-100 dark:border-white/5 bg-zinc-50 dark:bg-white/5 flex items-center gap-1.5">
+                  Quality
+                  <InfoTooltip text="Basic: fast. Great: balanced. Best: maximum quality." />
+                </div>
+                <div className="p-3 flex gap-2">
+                  {(['basic', 'great', 'best'] as const).map((p) => (
+                    <button
+                      key={p}
+                      type="button"
+                      onClick={() => applyPreset(p)}
+                      className={`flex-1 py-2 rounded-lg text-xs font-semibold transition-colors ${
+                        qualityPreset === p ? 'bg-pink-500 text-white' : 'bg-zinc-100 dark:bg-white/5 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200 dark:hover:bg-white/10'
+                      }`}
+                    >
+                      {p === 'basic' ? 'Basic' : p === 'great' ? 'Great' : 'Best'}
+                    </button>
+                  ))}
+                </div>
               </div>
-              <div className="p-3 flex gap-2">
-                {(['basic', 'great', 'best'] as const).map((p) => (
-                  <button
-                    key={p}
-                    type="button"
-                    onClick={() => applyPreset(p)}
-                    className={`flex-1 py-2 rounded-lg text-xs font-semibold transition-colors ${
-                      qualityPreset === p ? 'bg-pink-500 text-white' : 'bg-zinc-100 dark:bg-white/5 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200 dark:hover:bg-white/10'
-                    }`}
-                  >
-                    {p === 'basic' ? 'Basic' : p === 'great' ? 'Great' : 'Best'}
-                  </button>
-                ))}
-              </div>
-            </div>
+            )}
 
             {coverValidationError && (
               <p className="text-sm text-red-600 dark:text-red-400" role="alert">{coverValidationError}</p>
@@ -1735,80 +2131,141 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
         {/* CUSTOM MODE */}
         {createMode === 'custom' && (
           <div className="space-y-5">
+            {/* Suno Model Selector (Custom mode) */}
+            {isSuno && (
+              <SunoModelSelector
+                selectedModel={sunoModel}
+                onModelChange={setSunoModel}
+              />
+            )}
+
+            {/* Suno Vocal Gender (Custom mode) */}
+            {isSuno && SUNO_MODEL_INFO[sunoModel]?.supportsGender && (
+              <div className="bg-white dark:bg-suno-card rounded-xl border border-zinc-200 dark:border-white/5 overflow-hidden">
+                <div className="px-3 py-2.5 text-xs font-bold uppercase tracking-wide text-zinc-500 dark:text-zinc-400 border-b border-zinc-100 dark:border-white/5 bg-zinc-50 dark:bg-white/5">
+                  Vocal Gender
+                </div>
+                <div className="p-3 flex gap-2">
+                  {(['Auto', 'Male', 'Female'] as const).map((g) => (
+                    <button
+                      key={g}
+                      type="button"
+                      onClick={() => setVocalGender(g === 'Auto' ? '' : g === 'Male' ? 'm' : 'f')}
+                      className={`flex-1 py-2 rounded-lg text-xs font-semibold transition-all ${
+                        (g === 'Auto' && vocalGender === '') || (g === 'Male' && vocalGender === 'm') || (g === 'Female' && vocalGender === 'f')
+                          ? 'bg-pink-500 text-white'
+                          : 'bg-zinc-100 dark:bg-white/5 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200 dark:hover:bg-white/10'
+                      }`}
+                    >
+                      {g}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {/* Title */}
             <div className="bg-white dark:bg-suno-card rounded-xl border border-zinc-200 dark:border-white/5 overflow-hidden">
               <div className="px-3 py-2.5 text-xs font-bold uppercase tracking-wide text-zinc-500 dark:text-zinc-400 border-b border-zinc-100 dark:border-white/5 bg-zinc-50 dark:bg-white/5">
-                Title
+                <div className="flex items-center justify-between">
+                  <span>Title</span>
+                  {isSuno && (
+                    <span className="text-[10px] font-mono text-zinc-400">{title.length}/{modelLimits.title}</span>
+                  )}
+                </div>
               </div>
               <input
                 type="text"
                 value={title}
-                onChange={(e) => setTitle(e.target.value)}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  if (isSuno && val.length > modelLimits.title) return;
+                  setTitle(val);
+                }}
                 placeholder="Name your song"
                 className="w-full bg-transparent p-3 text-sm text-zinc-900 dark:text-white placeholder-zinc-400 dark:placeholder-zinc-600 focus:outline-none"
               />
             </div>
 
-            {/* Style of Music (shared with Simple: same style field + genre presets) */}
+            {/* Style of Music */}
             <div className="bg-white dark:bg-suno-card rounded-xl border border-zinc-200 dark:border-white/5 overflow-hidden transition-colors group focus-within:border-zinc-400 dark:focus-within:border-white/20">
               <div className="flex items-center justify-between px-3 py-2.5 bg-zinc-50 dark:bg-white/5 border-b border-zinc-100 dark:border-white/5">
                 <div>
                   <span className="inline-flex items-center gap-1.5">
                     <span className="text-xs font-bold text-zinc-500 dark:text-zinc-400 uppercase tracking-wide">Style of Music</span>
-                    <InfoTooltip text={(taskType === 'cover' || taskType === 'audio2audio') ? 'Target style for the cover (genre, mood, instruments). Lower Cover Strength gives this more influence over the source.' : 'Genre, mood, instruments, vibe. Same as Simple mode — switching tabs keeps this text.'} />
+                    <InfoTooltip text={isSuno ? 'Describe the style, genre, mood, instruments for your Suno generation.' : (taskType === 'cover' || taskType === 'audio2audio') ? 'Target style for the cover (genre, mood, instruments). Lower Cover Strength gives this more influence over the source.' : 'Genre, mood, instruments, vibe. Same as Simple mode — switching tabs keeps this text.'} />
                   </span>
                   <p className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-0.5">Genre, mood, instruments, vibe</p>
                 </div>
-                <button
-                  className={`p-1.5 hover:bg-zinc-200 dark:hover:bg-white/10 rounded transition-colors ${isFormattingStyle ? 'text-pink-500 animate-pulse' : 'text-zinc-500 hover:text-black dark:hover:text-white'}`}
-                  title="AI Style Format - infer or enhance style prompt"
-                  onClick={handleFormatStyle}
-                  disabled={isFormattingStyle || isFormattingLyrics || (!style.trim() && !lyrics.trim())}
-                >
-                  {isFormattingStyle ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
-                </button>
+                <div className="flex items-center gap-2">
+                  {isSuno && (
+                    <span className={`text-[10px] font-mono ${style.length > modelLimits.style * 0.9 ? 'text-amber-500' : 'text-zinc-400'}`}>
+                      {style.length}/{modelLimits.style}
+                    </span>
+                  )}
+                  {!isSuno && (
+                    <button
+                      className={`p-1.5 hover:bg-zinc-200 dark:hover:bg-white/10 rounded transition-colors ${isFormattingStyle ? 'text-pink-500 animate-pulse' : 'text-zinc-500 hover:text-black dark:hover:text-white'}`}
+                      title="AI Style Format - infer or enhance style prompt"
+                      onClick={handleFormatStyle}
+                      disabled={isFormattingStyle || isFormattingLyrics || (!style.trim() && !lyrics.trim())}
+                    >
+                      {isFormattingStyle ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
+                    </button>
+                  )}
+                </div>
               </div>
               <div className="p-3 space-y-2">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <label className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400 shrink-0">Genre preset:</label>
-                  <select
-                    value={Object.keys(GENRE_PRESETS).find(k => GENRE_PRESETS[k] === style) || 'Custom'}
-                    onChange={(e) => {
-                      const key = e.target.value;
-                      if (key === 'Custom') return;
-                      const text = GENRE_PRESETS[key];
-                      if (text) {
-                        setStyle(text);
-                        const bpmMatch = text.match(/(\d+)\s*bpm/i);
-                        if (bpmMatch) setBpm(parseInt(bpmMatch[1], 10));
-                      }
-                    }}
-                    className="bg-zinc-100 dark:bg-black/30 text-zinc-900 dark:text-white text-xs rounded-lg px-2.5 py-1.5 border-0 focus:ring-2 focus:ring-pink-500/50 focus:outline-none"
-                  >
-                    <option value="Custom">Custom (type below)</option>
-                    {Object.keys(GENRE_PRESETS).map((name) => (
-                      <option key={name} value={name}>{name}</option>
-                    ))}
-                  </select>
-                </div>
+                {/* Genre preset — ACE-Step only */}
+                {!isSuno && (
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <label className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400 shrink-0">Genre preset:</label>
+                    <select
+                      value={Object.keys(GENRE_PRESETS).find(k => GENRE_PRESETS[k] === style) || 'Custom'}
+                      onChange={(e) => {
+                        const key = e.target.value;
+                        if (key === 'Custom') return;
+                        const text = GENRE_PRESETS[key];
+                        if (text) {
+                          setStyle(text);
+                          const bpmMatch = text.match(/(\d+)\s*bpm/i);
+                          if (bpmMatch) setBpm(parseInt(bpmMatch[1], 10));
+                        }
+                      }}
+                      className="bg-zinc-100 dark:bg-black/30 text-zinc-900 dark:text-white text-xs rounded-lg px-2.5 py-1.5 border-0 focus:ring-2 focus:ring-pink-500/50 focus:outline-none"
+                    >
+                      <option value="Custom">Custom (type below)</option>
+                      {Object.keys(GENRE_PRESETS).map((name) => (
+                        <option key={name} value={name}>{name}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
                 <textarea
                   value={style}
-                  onChange={(e) => setStyle(e.target.value)}
-                  placeholder="e.g. upbeat pop rock, emotional ballad, 90s hip hop — or use a genre preset above"
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    if (isSuno && val.length > modelLimits.style) return;
+                    setStyle(val);
+                  }}
+                  placeholder={isSuno ? "e.g. pop rock, emotional ballad, 90s hip hop, electronic ambient" : "e.g. upbeat pop rock, emotional ballad, 90s hip hop — or use a genre preset above"}
                   className="w-full h-20 bg-transparent text-sm text-zinc-900 dark:text-white placeholder-zinc-400 dark:placeholder-zinc-600 focus:outline-none resize-none border-0 p-0"
                 />
               </div>
-              <div className="px-3 pb-3 flex flex-wrap gap-2">
-                {['Pop', 'Rock', 'Electronic', 'Hip Hop', 'Jazz', 'Classical'].map(tag => (
-                  <button
-                    key={tag}
-                    onClick={() => setStyle(prev => prev ? `${prev}, ${tag}` : tag)}
-                    className="text-[10px] font-medium bg-zinc-100 dark:bg-white/5 hover:bg-zinc-200 dark:hover:bg-white/10 text-zinc-600 dark:text-zinc-400 hover:text-black dark:hover:text-white px-2.5 py-1 rounded-full transition-colors border border-zinc-200 dark:border-white/5"
-                  >
-                    {tag}
-                  </button>
-                ))}
-              </div>
+              {/* Quick tags — ACE-Step only */}
+              {!isSuno && (
+                <div className="px-3 pb-3 flex flex-wrap gap-2">
+                  {['Pop', 'Rock', 'Electronic', 'Hip Hop', 'Jazz', 'Classical'].map(tag => (
+                    <button
+                      key={tag}
+                      onClick={() => setStyle(prev => prev ? `${prev}, ${tag}` : tag)}
+                      className="text-[10px] font-medium bg-zinc-100 dark:bg-white/5 hover:bg-zinc-200 dark:hover:bg-white/10 text-zinc-600 dark:text-zinc-400 hover:text-black dark:hover:text-white px-2.5 py-1 rounded-full transition-colors border border-zinc-200 dark:border-white/5"
+                    >
+                      {tag}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
 
             {/* Lyrics */}
@@ -1868,25 +2325,138 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
               </div>
             </div>
 
-            {/* Vocal Language (Custom) */}
-            <div className="bg-white dark:bg-suno-card rounded-xl border border-zinc-200 dark:border-white/5 overflow-hidden">
-              <div className="px-3 py-2.5 text-xs font-bold uppercase tracking-wide text-zinc-500 dark:text-zinc-400 border-b border-zinc-100 dark:border-white/5 bg-zinc-50 dark:bg-white/5 flex items-center gap-1.5">
-                Vocal Language
-                <InfoTooltip text="ISO 639-1 language code for vocals. Auto/unknown lets the model detect. Affects vocal characteristics when not in Instrumental mode." />
+            {/* Vocal Language — ACE-Step only; Suno uses vocal gender above */}
+            {!isSuno && (
+              <div className="bg-white dark:bg-suno-card rounded-xl border border-zinc-200 dark:border-white/5 overflow-hidden">
+                <div className="px-3 py-2.5 text-xs font-bold uppercase tracking-wide text-zinc-500 dark:text-zinc-400 border-b border-zinc-100 dark:border-white/5 bg-zinc-50 dark:bg-white/5 flex items-center gap-1.5">
+                  Vocal Language
+                  <InfoTooltip text="ISO 639-1 language code for vocals. Auto/unknown lets the model detect. Affects vocal characteristics when not in Instrumental mode." />
+                </div>
+                <select
+                  value={vocalLanguage}
+                  onChange={(e) => setVocalLanguage(e.target.value)}
+                  className="w-full bg-transparent p-3 text-sm text-zinc-900 dark:text-white focus:outline-none"
+                >
+                  {VOCAL_LANGUAGES.map(lang => (
+                    <option key={lang.value} value={lang.value}>{lang.label}</option>
+                  ))}
+                </select>
+                <p className="text-[11px] text-zinc-400 dark:text-zinc-500 px-3 pb-2">Applies when not in Instrumental mode</p>
               </div>
-              <select
-                value={vocalLanguage}
-                onChange={(e) => setVocalLanguage(e.target.value)}
-                className="w-full bg-transparent p-3 text-sm text-zinc-900 dark:text-white focus:outline-none"
-              >
-                {VOCAL_LANGUAGES.map(lang => (
-                  <option key={lang.value} value={lang.value}>{lang.label}</option>
-                ))}
-              </select>
-              <p className="text-[11px] text-zinc-400 dark:text-zinc-500 px-3 pb-2">Applies when not in Instrumental mode</p>
-            </div>
+            )}
 
-            {/* Audio */}
+            {/* Suno-specific fields (Custom mode) */}
+            {isSuno && (
+              <div className="space-y-4">
+                {/* Negative Tags */}
+                <div className="bg-white dark:bg-suno-card rounded-xl border border-zinc-200 dark:border-white/5 overflow-hidden">
+                  <div className="px-3 py-2.5 text-xs font-bold uppercase tracking-wide text-zinc-500 dark:text-zinc-400 border-b border-zinc-100 dark:border-white/5 bg-zinc-50 dark:bg-white/5 flex items-center gap-1.5">
+                    Negative Tags
+                    <InfoTooltip text="Tags or styles to avoid in the generation (e.g. 'country, acoustic'). Suno will try to exclude these from the output." />
+                  </div>
+                  <input
+                    type="text"
+                    value={negativeTags}
+                    onChange={(e) => setNegativeTags(e.target.value)}
+                    placeholder="e.g. country, acoustic, slow"
+                    className="w-full bg-transparent p-3 text-sm text-zinc-900 dark:text-white placeholder-zinc-400 dark:placeholder-zinc-600 focus:outline-none"
+                  />
+                </div>
+
+                {/* Style Weight */}
+                <div className="bg-white dark:bg-suno-card rounded-xl border border-zinc-200 dark:border-white/5 p-4 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="inline-flex items-center gap-1.5">
+                      <label className="text-xs font-medium text-zinc-600 dark:text-zinc-400">Style Weight</label>
+                      <InfoTooltip text="How strongly the style/prompt is followed. Higher = closer to your description. (Suno styleWeight)" />
+                    </span>
+                    <span className="text-xs font-mono text-zinc-900 dark:text-white bg-zinc-100 dark:bg-black/20 px-2 py-0.5 rounded">{styleWeight.toFixed(2)}</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0"
+                    max="1"
+                    step="0.01"
+                    value={styleWeight}
+                    onChange={(e) => setStyleWeight(parseFloat(e.target.value))}
+                    className="w-full h-2 bg-zinc-200 dark:bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-pink-500"
+                  />
+                  <div className="flex justify-between text-[10px] text-zinc-500">
+                    <span>0 (Creative)</span>
+                    <span>1 (Strict)</span>
+                  </div>
+                </div>
+
+                {/* Weirdness Constraint */}
+                <div className="bg-white dark:bg-suno-card rounded-xl border border-zinc-200 dark:border-white/5 p-4 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="inline-flex items-center gap-1.5">
+                      <label className="text-xs font-medium text-zinc-600 dark:text-zinc-400">Weirdness</label>
+                      <InfoTooltip text="How creative/experimental the generation is. Higher = more experimental. (Suno weirdnessConstraint)" />
+                    </span>
+                    <span className="text-xs font-mono text-zinc-900 dark:text-white bg-zinc-100 dark:bg-black/20 px-2 py-0.5 rounded">{weirdnessConstraint.toFixed(2)}</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0"
+                    max="1"
+                    step="0.01"
+                    value={weirdnessConstraint}
+                    onChange={(e) => setWeirdnessConstraint(parseFloat(e.target.value))}
+                    className="w-full h-2 bg-zinc-200 dark:bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-pink-500"
+                  />
+                  <div className="flex justify-between text-[10px] text-zinc-500">
+                    <span>0 (Normal)</span>
+                    <span>1 (Experimental)</span>
+                  </div>
+                </div>
+
+                {/* Persona */}
+                <div className="bg-white dark:bg-suno-card rounded-xl border border-zinc-200 dark:border-white/5 overflow-hidden">
+                  <div className="px-3 py-2.5 text-xs font-bold uppercase tracking-wide text-zinc-500 dark:text-zinc-400 border-b border-zinc-100 dark:border-white/5 bg-zinc-50 dark:bg-white/5 flex items-center gap-1.5">
+                    Persona
+                    <InfoTooltip text="Apply a Suno Persona (style or voice) to influence the generation. Enter the Persona ID from your Suno account." />
+                  </div>
+                  <div className="p-3 space-y-2">
+                    <input
+                      type="text"
+                      value={personaId}
+                      onChange={(e) => setPersonaId(e.target.value)}
+                      placeholder="Persona ID (optional)"
+                      className="w-full bg-zinc-50 dark:bg-black/20 border border-zinc-200 dark:border-white/10 rounded-lg px-3 py-2 text-xs text-zinc-900 dark:text-white placeholder-zinc-400 dark:placeholder-zinc-600 focus:outline-none"
+                    />
+                    {personaId && (
+                      <select
+                        value={personaModel}
+                        onChange={(e) => setPersonaModel(e.target.value as 'style_persona' | 'voice_persona')}
+                        className="w-full bg-zinc-50 dark:bg-black/20 border border-zinc-200 dark:border-white/10 rounded-lg px-3 py-2 text-xs text-zinc-900 dark:text-white focus:outline-none"
+                      >
+                        <option value="style_persona">Style Persona</option>
+                        <option value="voice_persona">Voice Persona</option>
+                      </select>
+                    )}
+                  </div>
+                </div>
+
+                {/* Custom Seed */}
+                <div className="bg-white dark:bg-suno-card rounded-xl border border-zinc-200 dark:border-white/5 overflow-hidden">
+                  <div className="px-3 py-2.5 text-xs font-bold uppercase tracking-wide text-zinc-500 dark:text-zinc-400 border-b border-zinc-100 dark:border-white/5 bg-zinc-50 dark:bg-white/5 flex items-center gap-1.5">
+                    Custom Seed
+                    <InfoTooltip text="Set a specific seed for reproducible generations. Leave empty for random." />
+                  </div>
+                  <input
+                    type="text"
+                    value={customSeed}
+                    onChange={(e) => setCustomSeed(e.target.value)}
+                    placeholder="Leave empty for random seed"
+                    className="w-full bg-transparent p-3 text-sm text-zinc-900 dark:text-white placeholder-zinc-400 dark:placeholder-zinc-600 focus:outline-none"
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* Audio — ACE-Step only (reference/cover audio picker) */}
+            {!isSuno && (
             <div
               onDrop={(e) => handleDrop(e, audioTab)}
               onDragOver={handleDragOver}
@@ -2085,10 +2655,12 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
                 )}
               </div>
             </div>
+            )}
 
           </div>
         )}
 
+        {/* COMMON SETTINGS */}
         {/* COMMON SETTINGS */}
         <div className="space-y-4">
           {/* Instrumental Toggle (Simple Mode) */}
@@ -2109,8 +2681,10 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
 
         </div>
 
-        {/* MUSIC PARAMETERS — Custom mode only (Simple has these in Quick Settings) */}
-        {customMode && (
+        {/* MUSIC PARAMETERS + ADVANCED SETTINGS — ACE-Step only; Suno does not use these */}
+        {!isSuno && customMode && (
+        <>
+        {/* Music Parameters */}
         <div className="bg-white dark:bg-suno-card rounded-xl border border-zinc-200 dark:border-white/5 p-4 space-y-4">
           <h3 className="text-xs font-bold text-zinc-500 dark:text-zinc-400 uppercase tracking-wide flex items-center gap-2">
             <Sliders size={14} />
@@ -2179,11 +2753,8 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
             </div>
           </div>
         </div>
-        )}
 
         {/* ADVANCED SETTINGS — Custom mode only; Simple has no advanced section */}
-        {customMode && (
-        <>
         <button
           onClick={() => setShowAdvanced(!showAdvanced)}
           className="w-full flex items-center justify-between px-4 py-3 bg-white dark:bg-suno-card rounded-xl border border-zinc-200 dark:border-white/5 text-sm font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-50 dark:hover:bg-white/5 transition-colors"
@@ -2858,6 +3429,134 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
         )}
         </>
         )}
+
+
+        {/* SUNO ADVANCED SETTINGS — Custom mode only */}
+        {customMode && isSuno && (
+        <>
+        <button
+          onClick={() => setShowAdvanced(!showAdvanced)}
+          className="w-full flex items-center justify-between px-4 py-3 bg-white dark:bg-suno-card rounded-xl border border-zinc-200 dark:border-white/5 text-sm font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-50 dark:hover:bg-white/5 transition-colors"
+        >
+          <div className="flex items-center gap-2">
+            <Settings2 size={16} className="text-zinc-500" />
+            <span>Suno Advanced Settings</span>
+          </div>
+          <ChevronDown size={16} className={`text-zinc-500 transition-transform ${showAdvanced ? 'rotate-180' : ''}`} />
+        </button>
+
+        {showAdvanced && (
+          <div className="bg-white dark:bg-suno-card rounded-xl border border-zinc-200 dark:border-white/5 p-4 space-y-4">
+
+            <p className="text-[11px] text-zinc-500 dark:text-zinc-400 border-b border-zinc-100 dark:border-white/5 pb-2">Suno-specific advanced controls.</p>
+
+            {/* Negative Tags */}
+            <div className="space-y-1.5">
+              <span className="inline-flex items-center gap-1.5">
+                <label className="text-xs font-medium text-zinc-600 dark:text-zinc-400">Negative Tags</label>
+                <InfoTooltip text="Tags or styles to avoid in the generation. Suno will try to exclude these from the output." />
+              </span>
+              <input
+                type="text"
+                value={negativeTags}
+                onChange={(e) => setNegativeTags(e.target.value)}
+                placeholder="e.g. country, acoustic, slow"
+                className="w-full bg-zinc-50 dark:bg-black/20 border border-zinc-200 dark:border-white/10 rounded-lg px-3 py-2 text-xs text-zinc-900 dark:text-white focus:outline-none"
+              />
+            </div>
+
+            {/* Style Weight */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="inline-flex items-center gap-1.5">
+                  <label className="text-xs font-medium text-zinc-600 dark:text-zinc-400">Style Weight</label>
+                  <InfoTooltip text="How strongly the style/prompt is followed. Higher = closer to your description. (Suno styleWeight)" />
+                </span>
+                <span className="text-xs font-mono text-zinc-900 dark:text-white bg-zinc-100 dark:bg-black/20 px-2 py-0.5 rounded">{styleWeight.toFixed(2)}</span>
+              </div>
+              <input
+                type="range"
+                min="0"
+                max="1"
+                step="0.01"
+                value={styleWeight}
+                onChange={(e) => setStyleWeight(parseFloat(e.target.value))}
+                className="w-full h-2 bg-zinc-200 dark:bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-pink-500"
+              />
+              <div className="flex justify-between text-[10px] text-zinc-500">
+                <span>0 (Creative)</span>
+                <span>1 (Strict)</span>
+              </div>
+            </div>
+
+            {/* Weirdness Constraint */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="inline-flex items-center gap-1.5">
+                  <label className="text-xs font-medium text-zinc-600 dark:text-zinc-400">Weirdness</label>
+                  <InfoTooltip text="How creative/experimental the generation is. Higher = more experimental. (Suno weirdnessConstraint)" />
+                </span>
+                <span className="text-xs font-mono text-zinc-900 dark:text-white bg-zinc-100 dark:bg-black/20 px-2 py-0.5 rounded">{weirdnessConstraint.toFixed(2)}</span>
+              </div>
+              <input
+                type="range"
+                min="0"
+                max="1"
+                step="0.01"
+                value={weirdnessConstraint}
+                onChange={(e) => setWeirdnessConstraint(parseFloat(e.target.value))}
+                className="w-full h-2 bg-zinc-200 dark:bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-pink-500"
+              />
+              <div className="flex justify-between text-[10px] text-zinc-500">
+                <span>0 (Normal)</span>
+                <span>1 (Experimental)</span>
+              </div>
+            </div>
+
+            {/* Persona */}
+            <div className="space-y-1.5">
+              <span className="inline-flex items-center gap-1.5">
+                <label className="text-xs font-medium text-zinc-600 dark:text-zinc-400">Persona ID</label>
+                <InfoTooltip text="Apply a Suno Persona (style or voice) to influence the generation. Enter the Persona ID from your Suno account." />
+              </span>
+              <input
+                type="text"
+                value={personaId}
+                onChange={(e) => setPersonaId(e.target.value)}
+                placeholder="Persona ID (optional)"
+                className="w-full bg-zinc-50 dark:bg-black/20 border border-zinc-200 dark:border-white/10 rounded-lg px-3 py-2 text-xs text-zinc-900 dark:text-white focus:outline-none"
+              />
+              {personaId && (
+                <select
+                  value={personaModel}
+                  onChange={(e) => setPersonaModel(e.target.value as 'style_persona' | 'voice_persona')}
+                  className="w-full bg-zinc-50 dark:bg-black/20 border border-zinc-200 dark:border-white/10 rounded-lg px-3 py-2 text-xs text-zinc-900 dark:text-white focus:outline-none"
+                >
+                  <option value="style_persona">Style Persona</option>
+                  <option value="voice_persona">Voice Persona</option>
+                </select>
+              )}
+            </div>
+
+            {/* Custom Seed */}
+            <div className="space-y-1.5">
+              <span className="inline-flex items-center gap-1.5">
+                <label className="text-xs font-medium text-zinc-600 dark:text-zinc-400">Custom Seed</label>
+                <InfoTooltip text="Set a specific seed for reproducible generations. Leave empty for random." />
+              </span>
+              <input
+                type="text"
+                value={customSeed}
+                onChange={(e) => setCustomSeed(e.target.value)}
+                placeholder="Leave empty for random seed"
+                className="w-full bg-zinc-50 dark:bg-black/20 border border-zinc-200 dark:border-white/10 rounded-lg px-3 py-2 text-xs text-zinc-900 dark:text-white focus:outline-none"
+              />
+            </div>
+
+          </div>
+        )}
+        </>
+        )}
       </div>
 
       {showAudioModal && (
@@ -3121,21 +3820,52 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
         {(legoValidationError || coverValidationError) && (
           <p className="text-sm text-red-600 dark:text-red-400" role="alert">{legoValidationError || coverValidationError}</p>
         )}
+        {/* Suno Credits Indicator */}
+        {isSuno && sunoCredits !== null && (
+          <div className="flex items-center justify-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
+            <span className="inline-flex items-center gap-1">
+              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+              Suno Credits: <span className="font-mono font-bold text-zinc-900 dark:text-white">{sunoCredits}</span>
+            </span>
+          </div>
+        )}
+        {/* Suno Callback URL */}
+        {isSuno && (
+          <div className="space-y-1">
+            <label className="text-[10px] text-zinc-500 dark:text-zinc-400 font-medium">Callback URL (required for Suno)</label>
+            <input
+              type="text"
+              value={callbackUrl}
+              onChange={(e) => setCallbackUrl(e.target.value)}
+              placeholder="https://your-callback-url.com/webhook"
+              className="w-full bg-zinc-50 dark:bg-black/20 border border-zinc-200 dark:border-white/10 rounded-lg px-3 py-1.5 text-xs text-zinc-900 dark:text-white focus:outline-none focus:border-pink-500"
+            />
+          </div>
+        )}
         <button
           onClick={() => void handleGenerate()}
-          className="w-full h-12 rounded-xl font-bold text-base flex items-center justify-center gap-2 transition-all transform active:scale-[0.98] bg-gradient-to-r from-orange-500 to-pink-600 text-white shadow-lg hover:brightness-110"
+          disabled={isGenerating || (isSuno && sunoCredits !== null && sunoCredits <= 0)}
+          className="w-full h-12 rounded-xl font-bold text-base flex items-center justify-center gap-2 transition-all transform active:scale-[0.98] bg-gradient-to-r from-orange-500 to-pink-600 text-white shadow-lg hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100"
         >
           <Sparkles size={18} />
           <span>
-            {createMode === 'lego'
-              ? 'Generate Lego track'
-              : createMode === 'cover'
-                ? 'Generate cover'
-                : bulkCount > 1
-                ? `Create ${bulkCount} Jobs (${bulkCount * batchSize} tracks)`
-                : `Create${batchSize > 1 ? ` (${batchSize} variations)` : ''}`}
+            {isSuno
+              ? createMode === 'cover'
+                ? 'Generate Suno Cover'
+                : `Create with Suno ${sunoModel}`
+              : createMode === 'lego'
+                ? 'Generate Lego track'
+                : createMode === 'cover'
+                  ? 'Generate cover'
+                  : bulkCount > 1
+                  ? `Create ${bulkCount} Jobs (${bulkCount * batchSize} tracks)`
+                  : `Create${batchSize > 1 ? ` (${batchSize} variations)` : ''}`}
           </span>
         </button>
+        {/* Branding */}
+        <p className="text-center text-[10px] text-zinc-400 dark:text-zinc-500">
+          Desarrollado por Salcido Studios y Ninja AI
+        </p>
       </div>
     </div>
   );

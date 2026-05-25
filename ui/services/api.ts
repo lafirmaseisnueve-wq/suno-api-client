@@ -511,6 +511,446 @@ export const playlistsApi = {
     api(`/api/playlists/${id}`, { method: 'DELETE', token }),
 };
 
+// ---------------------------------------------------------------------------
+// Suno API (Cloud-based AI music generation)
+// ---------------------------------------------------------------------------
+
+/** Suno API model identifiers. */
+export type SunoModel = 'V4' | 'V4_5' | 'V4_5PLUS' | 'V4_5ALL' | 'V5' | 'V5_5';
+
+/** Character limits per Suno model. */
+export const SUNO_MODEL_LIMITS: Record<SunoModel, { prompt: number; style: number; title: number }> = {
+  V4: { prompt: 3000, style: 200, title: 80 },
+  V4_5: { prompt: 5000, style: 1000, title: 100 },
+  V4_5PLUS: { prompt: 5000, style: 1000, title: 100 },
+  V4_5ALL: { prompt: 5000, style: 1000, title: 80 },
+  V5: { prompt: 5000, style: 1000, title: 100 },
+  V5_5: { prompt: 5000, style: 1000, title: 100 },
+};
+
+/** Suno model descriptions for UI display. */
+export const SUNO_MODEL_INFO: Record<SunoModel, { name: string; description: string; maxDuration: string; features: string[] }> = {
+  V4: { name: 'Suno v4', description: 'Improved vocal quality, proven consistency.', maxDuration: '4 min', features: ['Vocal clarity', 'Consistent', 'Cross-genre'] },
+  V4_5: { name: 'Suno v4.5', description: 'Smart prompts, faster generations.', maxDuration: '8 min', features: ['Smart prompts', 'Fast', 'Complex requests'] },
+  V4_5PLUS: { name: 'Suno v4.5+', description: 'Richer sound, more ways to create.', maxDuration: '8 min', features: ['Richer tones', 'Professional', 'Advanced features'] },
+  V4_5ALL: { name: 'Suno v4.5 ALL', description: 'Better song structure across all genres.', maxDuration: '8 min', features: ['All genres', 'Better structure', 'Versatile'] },
+  V5: { name: 'Suno v5', description: 'Superior musical expression, faster generation.', maxDuration: '8 min', features: ['Superior expression', 'Realistic vocals', 'Popular choice'] },
+  V5_5: { name: 'Suno v5.5', description: 'Custom models tailored to your unique taste.', maxDuration: '8 min', features: ['Voice customization', 'Latest model', 'Personalized'] },
+};
+
+/** Models that support vocal_gender parameter. */
+export const SUNO_MODELS_WITH_GENDER: SunoModel[] = ['V4_5', 'V4_5PLUS', 'V5', 'V5_5'];
+
+/** Models available for add-vocals / add-instrumental. */
+export const SUNO_VOCAL_MODELS: SunoModel[] = ['V4_5PLUS', 'V5', 'V5_5'];
+
+/** Suno generation status values. */
+export type SunoStatus = 'PENDING' | 'TEXT_SUCCESS' | 'SUCCESS' | 'FAILED' | 'ERROR';
+
+/** Suno callback stages. */
+export type SunoCallbackStage = 'text' | 'first' | 'complete';
+
+/** Suno credits response. */
+export interface SunoCreditsResponse {
+  code: number;
+  msg: string;
+  data: number;
+}
+
+/** Suno generation task response. */
+export interface SunoTaskResponse {
+  code: number;
+  msg: string;
+  data: {
+    taskId: string;
+    status: SunoStatus;
+  };
+}
+
+/** Suno generation status / record-info response. */
+export interface SunoGenerationStatus {
+  code: number;
+  msg: string;
+  data: {
+    taskId: string;
+    status: SunoStatus;
+    response?: {
+      sunoData: Array<{
+        id: string;
+        title: string;
+        sourceAudioUrl: string;
+        audioUrl: string;
+        imageUrl: string;
+        duration: number;
+        tags: string;
+      }>;
+    };
+    params?: Record<string, unknown>;
+  };
+}
+
+/** Suno config response. */
+export interface SunoConfigResponse {
+  api_key?: string;
+  configured: boolean;
+  callback_url?: string;
+  default_model?: SunoModel;
+}
+
+/** Suno cover generation response. */
+export interface SunoCoverResponse {
+  code: number;
+  msg: string;
+  data: {
+    taskId: string;
+    status: SunoStatus;
+  };
+}
+
+/** Suno vocal separation response. */
+export interface SunoVocalSeparationResponse {
+  code: number;
+  msg: string;
+  data: {
+    taskId: string;
+    status: SunoStatus;
+  };
+}
+
+/** Suno voice validation phrase response. */
+export interface SunoVoiceValidationResponse {
+  code: number;
+  msg: string;
+  data: {
+    taskId: string;
+    phrase?: string;
+    status: SunoStatus;
+  };
+}
+
+/** Suno file upload response. */
+export interface SunoFileUploadResponse {
+  code: number;
+  msg: string;
+  data: {
+    url: string;
+    uploadPath: string;
+    fileName: string;
+  };
+}
+
+/** Suno style boost response. */
+export interface SunoStyleBoostResponse {
+  code: number;
+  msg: string;
+  data: {
+    content: string;
+  };
+}
+
+/** Suno lyrics generation response. */
+export interface SunoLyricsResponse {
+  code: number;
+  msg: string;
+  data: {
+    taskId: string;
+    lyrics?: string;
+    status: SunoStatus;
+  };
+}
+
+/** Suno MIDI generation response. */
+export interface SunoMidiResponse {
+  code: number;
+  msg: string;
+  data: {
+    taskId: string;
+    status: SunoStatus;
+  };
+}
+
+/** Suno persona generation response. */
+export interface SunoPersonaResponse {
+  code: number;
+  msg: string;
+  data: {
+    taskId: string;
+    personaId?: string;
+    status: SunoStatus;
+  };
+}
+
+/** Suno music video (MP4) generation response. */
+export interface SunoVideoResponse {
+  code: number;
+  msg: string;
+  data: {
+    taskId: string;
+    status: SunoStatus;
+  };
+}
+
+/** Parameters for Suno music generation. */
+export interface SunoGenerateParams {
+  prompt: string;
+  style?: string;
+  title?: string;
+  lyrics?: string;
+  is_instrumental?: boolean;
+  custom_mode?: boolean;
+  model?: SunoModel;
+  callback_url?: string;
+  persona_id?: string;
+  persona_model?: 'style_persona' | 'voice_persona';
+  negative_tags?: string;
+  vocal_gender?: 'm' | 'f';
+  style_weight?: number;
+  weirdness_constraint?: number;
+  audio_weight?: number;
+  custom_seed?: string;
+}
+
+/** Parameters for Suno extend. */
+export interface SunoExtendParams {
+  audio_id: string;
+  model?: SunoModel;
+  custom_mode?: boolean;
+  prompt?: string;
+  style?: string;
+  title?: string;
+  continue_at?: number;
+  callback_url?: string;
+  persona_id?: string;
+  persona_model?: 'style_persona' | 'voice_persona';
+  negative_tags?: string;
+  vocal_gender?: 'm' | 'f';
+  style_weight?: number;
+  weirdness_constraint?: number;
+  audio_weight?: number;
+}
+
+/** Parameters for Suno add-vocals. */
+export interface SunoAddVocalsParams {
+  upload_url: string;
+  prompt: string;
+  title: string;
+  style: string;
+  negative_tags: string;
+  callback_url: string;
+  model?: SunoModel;
+  vocal_gender?: 'm' | 'f';
+  style_weight?: number;
+  weirdness_constraint?: number;
+  audio_weight?: number;
+}
+
+/** Parameters for Suno add-instrumental. */
+export interface SunoAddInstrumentalParams {
+  upload_url: string;
+  title: string;
+  tags: string;
+  negative_tags: string;
+  callback_url: string;
+  model?: SunoModel;
+  vocal_gender?: 'm' | 'f';
+  style_weight?: number;
+  weirdness_constraint?: number;
+  audio_weight?: number;
+}
+
+/** Parameters for Suno upload-cover. */
+export interface SunoUploadCoverParams {
+  upload_url: string;
+  prompt?: string;
+  style?: string;
+  title?: string;
+  model?: SunoModel;
+  custom_mode?: boolean;
+  instrumental?: boolean;
+  callback_url?: string;
+  persona_id?: string;
+  persona_model?: 'style_persona' | 'voice_persona';
+  negative_tags?: string;
+  vocal_gender?: 'm' | 'f';
+  style_weight?: number;
+  weirdness_constraint?: number;
+  audio_weight?: number;
+}
+
+/** Parameters for Suno upload-extend. */
+export interface SunoUploadExtendParams {
+  upload_url: string;
+  prompt: string;
+  style: string;
+  title: string;
+  continue_at: number;
+  model?: SunoModel;
+  custom_mode?: boolean;
+  callback_url?: string;
+  persona_id?: string;
+  persona_model?: 'style_persona' | 'voice_persona';
+  negative_tags?: string;
+  vocal_gender?: 'm' | 'f';
+  style_weight?: number;
+  weirdness_constraint?: number;
+  audio_weight?: number;
+}
+
+export const sunoApi = {
+  // ========== Credits ==========
+  getCredits: (): Promise<SunoCreditsResponse> =>
+    api('/api/generate/suno/credits'),
+
+  // ========== Configuration ==========
+  getConfig: (): Promise<SunoConfigResponse> =>
+    api('/api/generate/suno/config'),
+
+  setConfig: (config: { api_key?: string; callback_url?: string; default_model?: SunoModel }): Promise<SunoConfigResponse> =>
+    api('/api/generate/suno/config', { method: 'POST', body: config }),
+
+  // ========== Music Generation ==========
+  generateMusic: (params: SunoGenerateParams): Promise<SunoTaskResponse> =>
+    api('/api/generate/suno/generate', { method: 'POST', body: params }),
+
+  getGenerationStatus: (taskId: string): Promise<SunoGenerationStatus> =>
+    api(`/api/generate/suno/status/${taskId}`),
+
+  // ========== Extend ==========
+  extendMusic: (params: SunoExtendParams): Promise<SunoTaskResponse> =>
+    api('/api/generate/suno/extend', { method: 'POST', body: params }),
+
+  uploadAndExtend: (params: SunoUploadExtendParams): Promise<SunoTaskResponse> =>
+    api('/api/generate/suno/upload-extend', { method: 'POST', body: params }),
+
+  // ========== Cover ==========
+  generateCover: (taskId: string, callbackUrl: string): Promise<SunoCoverResponse> =>
+    api('/api/generate/suno/cover', { method: 'POST', body: { taskId, callbackUrl } }),
+
+  uploadAndCover: (params: SunoUploadCoverParams): Promise<SunoTaskResponse> =>
+    api('/api/generate/suno/upload-cover', { method: 'POST', body: params }),
+
+  // ========== Vocals ==========
+  addVocals: (params: SunoAddVocalsParams): Promise<SunoTaskResponse> =>
+    api('/api/generate/suno/add-vocals', { method: 'POST', body: params }),
+
+  addInstrumental: (params: SunoAddInstrumentalParams): Promise<SunoTaskResponse> =>
+    api('/api/generate/suno/add-instrumental', { method: 'POST', body: params }),
+
+  // ========== Vocal Separation ==========
+  separateVocals: (taskId: string, audioId: string, callbackUrl: string, separationType?: 'separate_vocal' | 'split_stem'): Promise<SunoVocalSeparationResponse> =>
+    api('/api/generate/suno/separate-vocals', { method: 'POST', body: { taskId, audioId, callbackUrl, separationType: separationType || 'separate_vocal' } }),
+
+  getVocalSeparationDetails: (taskId: string): Promise<SunoVocalSeparationResponse> =>
+    api(`/api/generate/suno/vocal-separation-status/${taskId}`),
+
+  // ========== Lyrics ==========
+  generateLyrics: (prompt: string, theme?: string, language?: string, verseCount?: number): Promise<SunoLyricsResponse> =>
+    api('/api/generate/suno/generate-lyrics', { method: 'POST', body: { prompt, theme, language, verseCount: verseCount || 2 } }),
+
+  getLyricsDetails: (taskId: string): Promise<SunoLyricsResponse> =>
+    api(`/api/generate/suno/lyrics-status/${taskId}`),
+
+  getTimestampedLyrics: (lyricsId: string): Promise<SunoLyricsResponse> =>
+    api(`/api/generate/suno/timestamped-lyrics/${lyricsId}`),
+
+  // ========== Style Boost ==========
+  boostStyle: (content: string): Promise<SunoStyleBoostResponse> =>
+    api('/api/generate/suno/boost-style', { method: 'POST', body: { content } }),
+
+  // ========== MIDI ==========
+  generateMidi: (taskId: string, audioId: string, callbackUrl: string): Promise<SunoMidiResponse> =>
+    api('/api/generate/suno/generate-midi', { method: 'POST', body: { taskId, audioId, callbackUrl } }),
+
+  getMidiDetails: (taskId: string): Promise<SunoMidiResponse> =>
+    api(`/api/generate/suno/midi-status/${taskId}`),
+
+  // ========== Persona ==========
+  generatePersona: (audioUrl: string, personaName: string, callbackUrl: string, description?: string): Promise<SunoPersonaResponse> =>
+    api('/api/generate/suno/generate-persona', { method: 'POST', body: { audioUrl, personaName, callbackUrl, description } }),
+
+  // ========== Mashup ==========
+  generateMashup: (audioUrls: string[], prompt: string, callbackUrl: string, style?: string, title?: string): Promise<SunoTaskResponse> =>
+    api('/api/generate/suno/mashup', { method: 'POST', body: { audioUrls, prompt, callbackUrl, style, title } }),
+
+  // ========== Replace Section ==========
+  replaceSection: (taskId: string, audioId: string, startTime: number, endTime: number, prompt: string, callbackUrl: string, model?: SunoModel): Promise<SunoTaskResponse> =>
+    api('/api/generate/suno/replace-section', { method: 'POST', body: { taskId, audioId, startTime, endTime, prompt, callbackUrl, model: model || 'V4_5ALL' } }),
+
+  // ========== Sounds (SFX) ==========
+  generateSounds: (prompt: string, callbackUrl: string, duration?: number, numSounds?: number): Promise<SunoTaskResponse> =>
+    api('/api/generate/suno/generate-sounds', { method: 'POST', body: { prompt, callbackUrl, duration, numSounds: numSounds || 1 } }),
+
+  // ========== Music Video (MP4) ==========
+  createMusicVideo: (taskId: string, audioId: string, callbackUrl: string, author?: string, domainName?: string): Promise<SunoVideoResponse> =>
+    api('/api/generate/suno/create-video', { method: 'POST', body: { taskId, audioId, callbackUrl, author, domainName } }),
+
+  getVideoDetails: (taskId: string): Promise<SunoVideoResponse> =>
+    api(`/api/generate/suno/video-status/${taskId}`),
+
+  // ========== WAV Conversion ==========
+  convertToWav: (taskId: string, audioId: string, callbackUrl: string): Promise<SunoTaskResponse> =>
+    api('/api/generate/suno/convert-wav', { method: 'POST', body: { taskId, audioId, callbackUrl } }),
+
+  getWavDetails: (taskId: string): Promise<SunoTaskResponse> =>
+    api(`/api/generate/suno/wav-status/${taskId}`),
+
+  // ========== Cover Image Generation ==========
+  generateCoverImage: (taskId: string, callbackUrl: string): Promise<SunoCoverResponse> =>
+    api('/api/generate/suno/generate-cover-image', { method: 'POST', body: { taskId, callbackUrl } }),
+
+  getCoverImageDetails: (taskId: string): Promise<SunoCoverResponse> =>
+    api(`/api/generate/suno/cover-image-status/${taskId}`),
+
+  // ========== Suno Voice API ==========
+  voiceGenerateValidation: (callbackUrl: string): Promise<SunoVoiceValidationResponse> =>
+    api('/api/generate/suno/voice/generate-validation', { method: 'POST', body: { callbackUrl } }),
+
+  voiceGetValidation: (taskId: string): Promise<SunoVoiceValidationResponse> =>
+    api(`/api/generate/suno/voice/validate-info/${taskId}`),
+
+  voiceCreateCustom: (taskId: string, audioUrl: string, callbackUrl: string): Promise<SunoVoiceValidationResponse> =>
+    api('/api/generate/suno/voice/create', { method: 'POST', body: { taskId, audioUrl, callbackUrl } }),
+
+  voiceGetRecord: (taskId: string): Promise<SunoVoiceValidationResponse> =>
+    api(`/api/generate/suno/voice/record-info/${taskId}`),
+
+  voiceRegenerate: (taskId: string, callbackUrl: string): Promise<SunoVoiceValidationResponse> =>
+    api('/api/generate/suno/voice/regenerate', { method: 'POST', body: { taskId, callbackUrl } }),
+
+  voiceCheckAvailability: (taskId: string): Promise<{ available: boolean; voiceId?: string }> =>
+    api('/api/generate/suno/voice/check', { method: 'POST', body: { taskId } }),
+
+  // ========== File Upload ==========
+  uploadFile: async (file: File): Promise<SunoFileUploadResponse> => {
+    const url = `${API_BASE}/api/generate/suno/upload-file`;
+    const formData = new FormData();
+    formData.append('file', file);
+    const response = await fetch(url, {
+      method: 'POST',
+      credentials: 'include',
+      body: formData,
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ error: 'Upload failed' }));
+      throw new Error(error.error || error.details || 'Upload failed');
+    }
+    return response.json();
+  },
+
+  uploadFileByUrl: (fileUrl: string, uploadPath?: string, fileName?: string): Promise<SunoFileUploadResponse> =>
+    api('/api/generate/suno/upload-url', { method: 'POST', body: { fileUrl, uploadPath, fileName } }),
+
+  uploadFileBase64: (base64Data: string, uploadPath?: string, fileName?: string): Promise<SunoFileUploadResponse> =>
+    api('/api/generate/suno/upload-base64', { method: 'POST', body: { base64Data, uploadPath, fileName } }),
+
+  // ========== Utility ==========
+  ping: (): Promise<{ ok: boolean; credits: number }> =>
+    api('/api/generate/suno/ping'),
+
+  getDetails: (taskId: string, type: 'generation' | 'lyrics' | 'vocal' | 'midi' | 'video' | 'cover' | 'wav' | 'voice'): Promise<unknown> =>
+    api(`/api/generate/suno/details/${type}/${taskId}`),
+};
+
 // Search API
 export interface SearchResult {
   songs: Song[];

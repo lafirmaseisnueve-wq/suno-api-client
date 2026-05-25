@@ -116,6 +116,19 @@ export interface GenerationParams {
   isFormatCaption?: boolean;
   loraNameOrPath?: string;
   loraWeight?: number;
+
+  // Suno API Parameters (when backend === 'suno')
+  sunoModel?: string; // V4, V4_5, V4_5PLUS, V4_5ALL, V5, V5_5
+  callbackUrl?: string; // Required for Suno API - webhook URL for 3-stage callbacks
+  personaId?: string; // Persona ID or Suno Voice voiceId
+  personaModel?: 'style_persona' | 'voice_persona'; // Persona type
+  negativeTags?: string; // Styles/characteristics to exclude (Suno negative_tags)
+  vocalGender?: 'm' | 'f'; // Preferred vocal gender for Suno
+  styleWeight?: number; // Style adherence weight 0.00-1.00 (Suno)
+  weirdnessConstraint?: number; // Creativity/novelty 0.00-1.00 (Suno)
+  audioWeight?: number; // Audio consistency weight 0.00-1.00 (Suno)
+  customSeed?: string; // Custom seed for reproducibility (Suno)
+  backend?: 'suno' | 'acestep'; // Which backend to use for generation
 }
 
 export interface PlayerState {
